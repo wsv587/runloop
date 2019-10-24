@@ -55,7 +55,7 @@ enum {
     kCFRunLoopRunHandledSource = 4
 };
 
-// runloop的6种状态，用于通知observer
+// runloop的6种状态，用于通知observer runloop的状态变化
 /* Run Loop Observer Activities */
 typedef CF_OPTIONS(CFOptionFlags, CFRunLoopActivity) {
     kCFRunLoopEntry = (1UL << 0),			// 即将进入Loop
@@ -75,7 +75,11 @@ CF_EXPORT CFTypeID CFRunLoopGetTypeID(void);
 CF_EXPORT CFRunLoopRef CFRunLoopGetCurrent(void);
 // 获取主线程的RunLoop对象
 CF_EXPORT CFRunLoopRef CFRunLoopGetMain(void);
-
+/* 在Core Foundation中，针对Mode的操作，苹果只开放了以下3个API(Cocoa中也有功能一样的函数，不再列出):
+ * 我们没有办法直接创建一个CFRunLoopMode对象，
+ * 但是我们可以调用CFRunLoopAddCommonMode传入一个字符串向RunLoop中添加Mode，
+ * 传入的字符串即为Mode的名字，Mode对象应该是此时在RunLoop内部创建的
+*/
 CF_EXPORT CFStringRef CFRunLoopCopyCurrentMode(CFRunLoopRef rl);
 
 CF_EXPORT CFArrayRef CFRunLoopCopyAllModes(CFRunLoopRef rl);
@@ -83,25 +87,29 @@ CF_EXPORT CFArrayRef CFRunLoopCopyAllModes(CFRunLoopRef rl);
 CF_EXPORT void CFRunLoopAddCommonMode(CFRunLoopRef rl, CFStringRef mode);
 
 CF_EXPORT CFAbsoluteTime CFRunLoopGetNextTimerFireDate(CFRunLoopRef rl, CFStringRef mode);
-
+// runloop运行相关
 CF_EXPORT void CFRunLoopRun(void);
 CF_EXPORT SInt32 CFRunLoopRunInMode(CFStringRef mode, CFTimeInterval seconds, Boolean returnAfterSourceHandled);
 CF_EXPORT Boolean CFRunLoopIsWaiting(CFRunLoopRef rl);
 CF_EXPORT void CFRunLoopWakeUp(CFRunLoopRef rl);
 CF_EXPORT void CFRunLoopStop(CFRunLoopRef rl);
-
+/* 让runloop执行某个block
+ * 本质上是把block插入到一个由block对象组成的链表中，在runloop运行过程中取出链表中指定在当前mode下运行的block，挨个执行。
+ */
 #if __BLOCKS__
 CF_EXPORT void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^block)(void)) CF_AVAILABLE(10_6, 4_0); 
 #endif
-
+// source相关操作
 CF_EXPORT Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFStringRef mode);
 CF_EXPORT void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFStringRef mode);
 CF_EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFStringRef mode);
 
+// observer相关操作
 CF_EXPORT Boolean CFRunLoopContainsObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFStringRef mode);
 CF_EXPORT void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFStringRef mode);
 CF_EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFStringRef mode);
 
+// timer相关操作
 CF_EXPORT Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFStringRef mode);
 CF_EXPORT void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFStringRef mode);
 CF_EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFStringRef mode);
@@ -138,6 +146,7 @@ typedef struct {
 
 CF_EXPORT CFTypeID CFRunLoopSourceGetTypeID(void);
 
+// 创建source
 CF_EXPORT CFRunLoopSourceRef CFRunLoopSourceCreate(CFAllocatorRef allocator, CFIndex order, CFRunLoopSourceContext *context);
 
 CF_EXPORT CFIndex CFRunLoopSourceGetOrder(CFRunLoopSourceRef source);

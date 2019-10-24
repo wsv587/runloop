@@ -986,7 +986,7 @@ CF_INLINE void __CFRunLoopSourceUnlock(CFRunLoopSourceRef rls) {
 struct __CFRunLoopObserver {
     CFRuntimeBase _base;
     pthread_mutex_t _lock;
-    CFRunLoopRef _runLoop;
+    CFRunLoopRef _runLoop;  // observer所观察的runloop
     CFIndex _rlCount;
     CFOptionFlags _activities;		/* immutable */
     CFIndex _order;			/* immutable */
@@ -2951,7 +2951,7 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 	    CFTypeRef context[2] = {rl, rls};
 	    /* add new item to all common-modes */
         // 添加新的item也就是runloopSource到所有的commonMode中
-        // set是commonMode集合，CFSetApplyFunction遍历set，添加runloopSource到所有被标记为commonMode的mode中
+        // set是commonMode集合，CFSetApplyFunction遍历set，添加runloopSource到所有被标记为commonMode的mode->source0(source1)集合中
 	    CFSetApplyFunction(set, (__CFRunLoopAddItemToCommonModes), (void *)context);
 	    CFRelease(set);
 	}
