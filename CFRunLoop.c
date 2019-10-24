@@ -525,12 +525,12 @@ struct __CFRunLoopMode {
     CFRuntimeBase _base;
     pthread_mutex_t _lock;	/* must have the run loop locked before locking this */
     CFStringRef _name;	// mode名字
-    Boolean _stopped;
+    Boolean _stopped;   // mode的状态，标识mode是否停止
     char _padding[3];
-    CFMutableSetRef _sources0;	// sources0事件
-    CFMutableSetRef _sources1;	// sources1事件
-    CFMutableArrayRef _observers;	// 观察者
-    CFMutableArrayRef _timers;	// 定时器
+    CFMutableSetRef _sources0;	// sources0事件集合
+    CFMutableSetRef _sources1;	// sources1事件集合
+    CFMutableArrayRef _observers;	// 观察者数组
+    CFMutableArrayRef _timers;	// 定时器数组
     CFMutableDictionaryRef _portToV1SourceMap;	 //字典  key是mach_port_t，value是CFRunLoopSourceRef
     __CFPortSet _portSet;	//保存所有需要监听的port，比如_wakeUpPort，_timerPort都保存在这个数组中
     CFIndex _observerMask;
@@ -949,7 +949,7 @@ struct __CFRunLoopSource {
     uint32_t _bits;
     pthread_mutex_t _lock;
     CFIndex _order;			/* immutable */
-    CFMutableBagRef _runLoops;
+    CFMutableBagRef _runLoops;  // 一个source对应多个runloop
     union {
 	CFRunLoopSourceContext version0;	/* immutable, except invalidation */ // source0的结构体
         CFRunLoopSourceContext1 version1;	/* immutable, except invalidation */ // source1的结构体
@@ -1561,8 +1561,11 @@ static void __CFRunLoopAddItemsToCommonMode(const void *value, void *ctx) {
 }
 
 static void __CFRunLoopAddItemToCommonModes(const void *value, void *ctx) {
+    // modeName
     CFStringRef modeName = (CFStringRef)value;
+    // 对应的rl
     CFRunLoopRef rl = (CFRunLoopRef)(((CFTypeRef *)ctx)[0]);
+    // item:timer\source\observer
     CFTypeRef item = (CFTypeRef)(((CFTypeRef *)ctx)[1]);
     if (CFGetTypeID(item) == CFRunLoopSourceGetTypeID()) {
 	CFRunLoopAddSource(rl, (CFRunLoopSourceRef)item, modeName);
@@ -1909,6 +1912,7 @@ static Boolean __CFRunLoopDoSource1(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFRun
     return sourceHandled;
 }
 
+// 计算待插入的timer的插入位置
 static CFIndex __CFRunLoopInsertionIndexInTimerArray(CFArrayRef array, CFRunLoopTimerRef rlt) __attribute__((noinline));
 static CFIndex __CFRunLoopInsertionIndexInTimerArray(CFArrayRef array, CFRunLoopTimerRef rlt) {
     CFIndex cnt = CFArrayGetCount(array);
@@ -1917,10 +1921,12 @@ static CFIndex __CFRunLoopInsertionIndexInTimerArray(CFArrayRef array, CFRunLoop
     }
     if (256 < cnt) {
         CFRunLoopTimerRef item = (CFRunLoopTimerRef)CFArrayGetValueAtIndex(array, cnt - 1);
+        // 如果待插入的item的触发周期比最后一个还长，那么把待插入的item插入到最后的位置
         if (item->_fireTSR <= rlt->_fireTSR) {
             return cnt;
         }
         item = (CFRunLoopTimerRef)CFArrayGetValueAtIndex(array, 0);
+        // 如果待插入的item的触发周期比最后一个还短，那么把待插入的item插入到数组为0的位置
         if (rlt->_fireTSR < item->_fireTSR) {
             return 0;
         }
@@ -2054,6 +2060,8 @@ static void __CFRepositionTimerInMode(CFRunLoopModeRef rlm, CFRunLoopTimerRef rl
     
     // If we know in advance that the timer is not in the array (just being added now) then we can skip this search
     if (isInArray) {
+        // isInArray为true，说明timer之前就存在rlm->timers数组中，而非通过CFRunLoopAddTimer函数新加入的timer
+        // 所以，需要先在timer数组中移除timer，然后再根据timer下次触发时间计算timer应该插入的位置，最后把timer插入到数组合适的位置
         CFIndex idx = CFArrayGetFirstIndexOfValue(timerArray, CFRangeMake(0, CFArrayGetCount(timerArray)), rlt);
         if (kCFNotFound != idx) {
             CFRetain(rlt);
@@ -2062,7 +2070,9 @@ static void __CFRepositionTimerInMode(CFRunLoopModeRef rlm, CFRunLoopTimerRef rl
         }
     }
     if (!found && isInArray) return;
+    // 计算待插入的timer的位置
     CFIndex newIdx = __CFRunLoopInsertionIndexInTimerArray(timerArray, rlt);
+    // 插入item到timer数组中
     CFArrayInsertValueAtIndex(timerArray, newIdx, rlt);
     __CFArmNextTimerInMode(rlm, rlt->_runLoop);
     if (isInArray) CFRelease(rlt);
@@ -2927,17 +2937,21 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
     if (!__CFIsValid(rls)) return;
     Boolean doVer0Callout = false;
     __CFRunLoopLock(rl);
-    // 如果nodeName是commonMode，获取runloop的commonMode副本
+    // 如果modeName是commonMode，获取runloop的commonMode副本
     if (modeName == kCFRunLoopCommonModes) {
 	CFSetRef set = rl->_commonModes ? CFSetCreateCopy(kCFAllocatorSystemDefault, rl->_commonModes) : NULL;
-	if (NULL == rl->_commonModeItems) {
+        // runloop的commonModeItems集合为空则初始化一个集合
+        if (NULL == rl->_commonModeItems) {
 	    rl->_commonModeItems = CFSetCreateMutable(kCFAllocatorSystemDefault, 0, &kCFTypeSetCallBacks);
 	}
-	// 把source添加到commonModeItems中
+	// 把source添加到commonModeItems集合中
 	CFSetAddValue(rl->_commonModeItems, rls);
 	if (NULL != set) {
+        // 创建一个长度为2的数组，分别存储runloop和runloopSource
 	    CFTypeRef context[2] = {rl, rls};
 	    /* add new item to all common-modes */
+        // 添加新的item也就是runloopSource到所有的commonMode中
+        // set是commonMode集合，CFSetApplyFunction遍历set，添加runloopSource到所有被标记为commonMode的mode中
 	    CFSetApplyFunction(set, (__CFRunLoopAddItemToCommonModes), (void *)context);
 	    CFRelease(set);
 	}
@@ -2967,11 +2981,14 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 	    }
 	    __CFRunLoopSourceLock(rls);
 	    if (NULL == rls->_runLoops) {
+            // source有一个集合成员变量runLoops。source每被添加进一个runloop，都会把runloop添加到他的这个集合中
+            // 如官方注释所言：sources retain run loops!（source会持有runloop！）
 	        rls->_runLoops = CFBagCreateMutable(kCFAllocatorSystemDefault, 0, &kCFTypeBagCallBacks); // sources retain run loops!
 	    }
-	    // 更新runloopSource的runLoops集合
+	    // 更新runloopSource的runLoops集合，将rl添加到rls->_runloops中
 	    CFBagAddValue(rls->_runLoops, rl);
 	    __CFRunLoopSourceUnlock(rls);
+        // 如果rls是source0则doVer0Callout标记置为true，即需要向外调用回调
 	    if (0 == rls->_context.version0.version) {
 	        if (NULL != rls->_context.version0.schedule) {
 	            doVer0Callout = true;
@@ -2983,6 +3000,7 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 	}
     }
     __CFRunLoopUnlock(rl);
+    // 如果是source0，则向外层（上层）调用source0的schedule回调函数
     if (doVer0Callout) {
         // although it looses some protection for the source, we have no choice but
         // to do this after unlocking the run loop and mode locks, to avoid deadlocks
@@ -3125,13 +3143,17 @@ void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef rlo, CFStringRef
     __CFRunLoopLock(rl);
     if (modeName == kCFRunLoopCommonModes) {
 	CFSetRef set = rl->_commonModes ? CFSetCreateCopy(kCFAllocatorSystemDefault, rl->_commonModes) : NULL;
+        // 创建commonModeItems
 	if (NULL == rl->_commonModeItems) {
 	    rl->_commonModeItems = CFSetCreateMutable(kCFAllocatorSystemDefault, 0, &kCFTypeSetCallBacks);
 	}
+        // 添加observer到commonModeItems
 	CFSetAddValue(rl->_commonModeItems, rlo);
 	if (NULL != set) {
 	    CFTypeRef context[2] = {rl, rlo};
 	    /* add new item to all common-modes */
+        // set是commonMode集合
+        // CFSetApplyFunction遍历set，添加item到所有被标记为commonMode的mode中
 	    CFSetApplyFunction(set, (__CFRunLoopAddItemToCommonModes), (void *)context);
 	    CFRelease(set);
 	}
@@ -3220,20 +3242,27 @@ Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef rlt, CFStringR
     return hasValue;
 }
 
+// 添加timer到runloopMode中，添加timer到rl->commonModeItems中
 void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef rlt, CFStringRef modeName) {    
     CHECK_FOR_FORK();
     if (__CFRunLoopIsDeallocating(rl)) return;
     if (!__CFIsValid(rlt) || (NULL != rlt->_runLoop && rlt->_runLoop != rl)) return;
     __CFRunLoopLock(rl);
+    // 如果timer要添加的mode是commonMode
     if (modeName == kCFRunLoopCommonModes) {
+        // 获取rl->commonModes集合
 	CFSetRef set = rl->_commonModes ? CFSetCreateCopy(kCFAllocatorSystemDefault, rl->_commonModes) : NULL;
+        // 如果rl->_commonModeItems为空就初始化rl->commonModeItems
 	if (NULL == rl->_commonModeItems) {
 	    rl->_commonModeItems = CFSetCreateMutable(kCFAllocatorSystemDefault, 0, &kCFTypeSetCallBacks);
 	}
 	CFSetAddValue(rl->_commonModeItems, rlt);
 	if (NULL != set) {
+        // 长度为2的数组，分别存放rl和rlt
 	    CFTypeRef context[2] = {rl, rlt};
 	    /* add new item to all common-modes */
+        // 添加新的item也就是timer到所有的commonMode中
+        // set是commonMode集合，CFSetApplyFunction遍历set，添加context[1]存放的rlt添加到所有被标记为commonMode的mode中
 	    CFSetApplyFunction(set, (__CFRunLoopAddItemToCommonModes), (void *)context);
 	    CFRelease(set);
 	}
@@ -3256,11 +3285,15 @@ void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef rlt, CFStringRef modeN
                 __CFRunLoopUnlock(rl);
 		return;
 	    }
+        // 更新rlt的rlModes集合。将rlm->name添加到name中
   	    CFSetAddValue(rlt->_rlModes, rlm->_name);
             __CFRunLoopTimerUnlock(rlt);
             __CFRunLoopTimerFireTSRLock();
+            // Reposition释义复位。所以顾名思义该函数用于复位timer
+            // 此处调用该函数本质上是按照timer下次触发时间长短，计算timer需要插入到runloopMode->timers数组中的位置，然后把timer插入到runloopMode->timers数组中
             __CFRepositionTimerInMode(rlm, rlt, false);
             __CFRunLoopTimerFireTSRUnlock();
+            // 为了向后兼容，如果系统版本低于CFSystemVersionLion且timer执行的rl不是当前runloop，则唤醒rl
             if (!_CFExecutableLinkedOnOrAfter(CFSystemVersionLion)) {
                 // Normally we don't do this on behalf of clients, but for
                 // backwards compatibility due to the change in timer handling...
@@ -3869,12 +3902,15 @@ CFAbsoluteTime CFRunLoopTimerGetNextFireDate(CFRunLoopTimerRef rlt) {
 void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef rlt, CFAbsoluteTime fireDate) {
     CHECK_FOR_FORK();
     if (!__CFIsValid(rlt)) return;
+    // 触发日期大于最大限制时间，则把触发日期调整为最大触发时间
     if (TIMER_DATE_LIMIT < fireDate) fireDate = TIMER_DATE_LIMIT;
     uint64_t nextFireTSR = 0ULL;
     uint64_t now2 = mach_absolute_time();
     CFAbsoluteTime now1 = CFAbsoluteTimeGetCurrent();
+    // 下次触发时间小于现在则立即触发
     if (fireDate < now1) {
 	nextFireTSR = now2;
+    // 下次触发时间间隔大于允许的最大间隔TIMER_INTERVAL_LIMIT，则将下次触发时间调整为now + TIMER_INTERVAL_LIMIT
     } else if (TIMER_INTERVAL_LIMIT < fireDate - now1) {
 	nextFireTSR = now2 + __CFTimeIntervalToTSR(TIMER_INTERVAL_LIMIT);
     } else {
@@ -3882,30 +3918,39 @@ void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef rlt, CFAbsoluteTime fireDat
     }
     __CFRunLoopTimerLock(rlt);
     if (NULL != rlt->_runLoop) {
+        // 获取runloopMode个数
         CFIndex cnt = CFSetGetCount(rlt->_rlModes);
+        // 声明名为modes的栈结构
         STACK_BUFFER_DECL(CFTypeRef, modes, cnt);
+        // rlt->rlModes赋值给modes栈结构
         CFSetGetValues(rlt->_rlModes, (const void **)modes);
         // To avoid A->B, B->A lock ordering issues when coming up
         // towards the run loop from a source, the timer has to be
         // unlocked, which means we have to protect from object
         // invalidation, although that's somewhat expensive.
         for (CFIndex idx = 0; idx < cnt; idx++) {
+            // 先retain
             CFRetain(modes[idx]);
         }
         CFRunLoopRef rl = (CFRunLoopRef)CFRetain(rlt->_runLoop);
         __CFRunLoopTimerUnlock(rlt);
         __CFRunLoopLock(rl);
+        // 把modes集合中存储的modeName转换为mode结构体实例，然后再存入modes集合
         for (CFIndex idx = 0; idx < cnt; idx++) {
 	    CFStringRef name = (CFStringRef)modes[idx];
             modes[idx] = __CFRunLoopFindMode(rl, name, false);
+            // 后release
 	    CFRelease(name);
         }
         __CFRunLoopTimerFireTSRLock();
+        // 把上面计算好的下次触发时间设置给rlt
 	rlt->_fireTSR = nextFireTSR;
         rlt->_nextFireDate = fireDate;
         for (CFIndex idx = 0; idx < cnt; idx++) {
 	    CFRunLoopModeRef rlm = (CFRunLoopModeRef)modes[idx];
             if (rlm) {
+                // Reposition释义复位。所以顾名思义该函数用于复位timer，所谓复位，就是调整timer在runloopMode->timers数组中的位置
+                // 此处调用该函数本质上是先移除timer，然后按照timer下次触发时间长短计算timer需要插入到runloopMode->timers数组中的位置，最后把timer插入到runloopMode->timers数组中
                 __CFRepositionTimerInMode(rlm, rlt, true);
             }
         }
@@ -3919,10 +3964,15 @@ void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef rlt, CFAbsoluteTime fireDat
         // (which may be costly) for the caller, just in case.
         // (And useful for binary compatibility with older
         // code used to the older timer implementation.)
+        // 以上注释的意思是：这行代码的是为了给timer设置date，但不直接作用于runloop
+        // 以防万一，我们手动唤醒runloop，尽管有可能这个代价是高昂的
+        // 另一方面，这么做的目的也是为了兼容timer的之前的实现方式
+        // 如果timer执行的rl不是当前的runloop，则手动唤醒
         if (rl != CFRunLoopGetCurrent()) CFRunLoopWakeUp(rl);
         CFRelease(rl);
      } else {
         __CFRunLoopTimerFireTSRLock();
+         // 走到这里说明timer的rl还是空，所以只是简单的设置timer的下次触发时间
 	rlt->_fireTSR = nextFireTSR;
         rlt->_nextFireDate = fireDate;
         __CFRunLoopTimerFireTSRUnlock();
