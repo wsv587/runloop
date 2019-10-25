@@ -836,7 +836,9 @@ static Boolean __CFRunLoopModeIsEmpty(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFR
     if (0 != rlm->_msgQMask) return false;
 #endif
     Boolean libdispatchQSafe = pthread_main_np() && ((HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && NULL == previousMode) || (!HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && 0 == _CFGetTSD(__CFTSDKeyIsInGCDMainQ)));
+    // 将要运行的mode在commonModes中则判定mode不为空
     if (libdispatchQSafe && (CFRunLoopGetMain() == rl) && CFSetContainsValue(rl->_commonModes, rlm->_name)) return false; // represents the libdispatch main queue
+    // 将要运行的mode的source0、source1、timer个数不为0则判定mode不为空
     if (NULL != rlm->_sources0 && 0 < CFSetGetCount(rlm->_sources0)) return false;
     if (NULL != rlm->_sources1 && 0 < CFSetGetCount(rlm->_sources1)) return false;
     if (NULL != rlm->_timers && 0 < CFArrayGetCount(rlm->_timers)) return false;
@@ -845,6 +847,15 @@ static Boolean __CFRunLoopModeIsEmpty(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFR
         struct _block_item *curr = item;
         item = item->_next;
         Boolean doit = false;
+        // _block_item的_mode只可能是string或set类型
+        // 出现以下情况就不会return finish：
+        // 1>.将要运行的mode不为空
+        // 以下这几条是在__CFRunLoopModeIsEmpty函数中判断的:
+        // 2>.将要运行的currentMode是source0、source1、timer任一个不为空
+        // 3>.待执行的block的mode和将要运行的mode相同
+        // 4>.待执行的block的mode是commonMode且待运行的mode包含在commonMode中
+        // 5>.待执行的block的mode包含待运行的mode
+        // 6>.待执行的block的mode包含commonMode且待运行的mode包含在commonMode中
         if (CFStringGetTypeID() == CFGetTypeID(curr->_mode)) {
             doit = CFEqual(curr->_mode, rlm->_name) || (CFEqual(curr->_mode, kCFRunLoopCommonModes) && CFSetContainsValue(rl->_commonModes, rlm->_name));
         } else {
@@ -2726,11 +2737,12 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 
 SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterval seconds, Boolean returnAfterSourceHandled) {     /* DOES CALLOUT */
     CHECK_FOR_FORK();
+    // 如果runloop正在销毁则直接返回finish
     if (__CFRunLoopIsDeallocating(rl)) return kCFRunLoopRunFinished;
     __CFRunLoopLock(rl);
-    // 根据modeName获取mode
+    // 根据指定的modeName获取指定的mode，也就是将要运行的mode
     CFRunLoopModeRef currentMode = __CFRunLoopFindMode(rl, modeName, false);
-    // 如果currentMode是空则退出
+    // 如果获取到将要运行的currentMode是空则退出
     if (NULL == currentMode || __CFRunLoopModeIsEmpty(rl, currentMode, rl->_currentMode)) {
 	Boolean did = false;
 	if (currentMode) __CFRunLoopModeUnlock(currentMode);
@@ -2738,6 +2750,7 @@ SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterva
 	return did ? kCFRunLoopRunHandledSource : kCFRunLoopRunFinished;
     }
     volatile _per_run_data *previousPerRun = __CFRunLoopPushPerRunData(rl);
+    //
     CFRunLoopModeRef previousMode = rl->_currentMode;
     rl->_currentMode = currentMode;
     int32_t result = kCFRunLoopRunFinished;
