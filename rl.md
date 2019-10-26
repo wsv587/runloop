@@ -6,8 +6,28 @@
 
 对iOS开发者而言，runloop是一个老生常谈的话题，但凡是iOS开发者，在工作中必然直接或间接的接触过runloop。而对于面试者而言，runloop又几乎是必考点。在4年前，笔者写过一篇文章[NSRunLoop](https://www.cnblogs.com/wsnb/p/4753685.html)，对runloop原理以及应用场景做了基本介绍。但是对于不了解源码的同学，读起来也只能理解皮毛，不看源码的话，读了n多篇也是似懂非懂，对于原理也只能是死记硬背。所以，本文将从源码的角度剖析runloop的组成，强化自己对runloop的认识，验证我们脑海中一直以来似懂非懂的原理，真心希望这篇文章能够帮助到大家。
 # 为什么是runLoop
-runloop顾名思义就是”跑圈“，所谓跑圈就给人一种循环的感觉。runloop核心代码就是一个有状态的do...while循环。每循环一次就相当于跑了一圈，线程就会对当前这一圈里面产生的事件进行处理。那么为什么线程要有runloop呢？其实我们的APP可以理解为是靠event驱动的。我们触摸屏幕、网络回调等都是一个个的event，也就是事件。这些事件产生之后会分发给我们的APP，APP接收到事件之后分发给对应的线程。要想APP的线程一直能够处理事件，就要保活线程，也就是不能让线程早早的退出，此时runloop就派上用场了。我们已经说了，runloop本质上就是一个有状态的do...while循环，所以只要不是超时或者退出状态，那么runLoop就会一直执行do...while，所以可以保证线程不退出。其实也不是必须要给线程指定一个runloop，如果需要我们线程能够持续的处理事件，那么就需要给线程绑定一个runloop。也就是说，runloop能够保证线程一直可以一直处理事件。
-一句话概括runLoop：一个有状态的事件驱动的do...while循环。
+runloop顾名思义就是”跑圈“，所谓跑圈就给人一种循环的感觉。runloop运行的核心代码就是一个有状态的do...while循环。每循环一次就相当于跑了一圈，线程就会对当前这一圈里面产生的事件进行处理。那么为什么线程要有runloop呢？其实我们的APP可以理解为是靠event驱动的（包括iOS和Android应用）。我们触摸屏幕、网络回调等都是一个个的event，也就是事件。这些事件产生之后会分发给我们的APP，APP接收到事件之后分发给对应的线程。通常情况下，如果线程没有runloop，那么一个线程一次只能执行一个任务，执行完成后线程就会退出。要想APP的线程一直能够处理事件或者等待事件（比如异步事件），就要保活线程，也就是不能让线程早早的退出，此时runloop就派上用场了。我们已经说了，runloop本质上就是一个有状态的do...while循环，所以只要不是超时或者故意退出状态，那么runLoop就会一直执行do...while，所以可以保证线程不退出。其实也不是必须要给线程指定一个runloop，如果需要我们线程能够持续的处理事件，那么就需要给线程绑定一个runloop。也就是说，runloop能够保证线程一直可以一直处理事件。所以runloop的作用可以理解为：
+
+- 使程序一直运行并处理各种事件。这些事件包括但不限于用户操作、定时器任务、内核消息
+- 有顺序的处理各种Event。因为runLoop有状态，可以决定线程在什么时候处理什么事件
+- 节省CPU资源。通常情况下，事件并不是永无休止的产生，所以也就没必要让线程永无休止的运行。runloop可以在无事件处理时进入休眠状态，避免无休止的do...while跑空圈。
+
+# 无处不在的runLoop
+
+<img src="/Users/wangsong/Library/Application Support/typora-user-images/image-20191026150209717.png" alt="image-20191026150209717" style="zoom:50%;" />
+
+所有线程的几乎所有的函数都是从以下6个函数调起的:
+
+```c
+__CFRUNLOOP_IS_CALLING_OUT_TO_AN_OBSERVER_CALLBACK_FUNCTION__	// 回调observer
+__CFRUNLOOP_IS_CALLING_OUT_TO_A_BLOCK__												// 处理了block的回调
+__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__						// 主线程回调
+__CFRUNLOOP_IS_CALLING_OUT_TO_A_TIMER_CALLBACK_FUNCTION__			// timer回调
+__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE0_PERFORM_FUNCTION__		// source0回调
+__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__		// source1回调
+```
+
+以上这6个函数名字之所以如此之长，也只是为了实现自解释。
 
 # runLoop 结构
 runLoop的结构如下图所示：
@@ -17,16 +37,22 @@ runLoop的结构如下图所示：
 - 一个T对应一个RL
 - Cocoa层的NSRunLoop是对CF层的CFRunLoop的封装
 - 一个RL对应多个RLM
-- 一个RL一次只能执行一个RLM，要想切换RLM需要退出当前RLM重新进入新的RLM。
+- 一个RL一次只能执行一个RLM，runloop在同一个时间只能且必须在一种特定mode下run。要想切换RLM需要停止并退出当前RLM重新进入新的RLM。
   - 一次执行一个mode的好处在于，底层设计相对简单，避免不同的mode耦合在一起，代码相互影响
-  - 另一个好处是这样可以在不同的mode下执行不同的代码，避免业务代码相互影响
-- 每个RLM包括若干个RLS、若干个RLT、若干个RLO
+  - 另一个好处是这样可以在不同的mode下执行不同的代码，避免上层业务代码相互影响。
+  - 多个mode以及mode的切换是iOS app滑动顺畅的关键。
+  - 主线程中不同的代码指定在不同的mode下运行可以提高app的流畅度。
+- 每个RLM包括若干个RLS、若干个RLT、若干个RLO。
+
+
 
 ![RunLoop结构](/Users/wangsong/Library/Application Support/typora-user-images/image-20191023161055638.png)
 
 
 
-```objective-c
+## RunLoop结构体定义
+
+```c
 // RunLoop的结构体定义
 struct __CFRunLoop {
     CFRuntimeBase _base;
@@ -50,7 +76,28 @@ struct __CFRunLoop {
 
 
 
-唤醒runloop的方式：
+
+
+```c
+// source相关操作
+CF_EXPORT Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFStringRef mode);
+CF_EXPORT void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFStringRef mode);
+CF_EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFStringRef mode);
+
+// observer相关操作
+CF_EXPORT Boolean CFRunLoopContainsObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFStringRef mode);
+CF_EXPORT void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFStringRef mode);
+CF_EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFStringRef mode);
+
+// timer相关操作
+CF_EXPORT Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFStringRef mode);
+CF_EXPORT void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFStringRef mode);
+CF_EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFStringRef mode);
+```
+
+
+
+## 手动唤醒runloop的方式
 
 - static void __CFRunLoopTimeout(void *arg) {}
   - The interval is DISPATCH_TIME_FOREVER, so this won't fire again。因为runloop的执行时长是forever，所有runloop永远不会超时，也就说函数__CFRunLoopTimeout永远不会执行到。
@@ -66,28 +113,16 @@ struct __CFRunLoop {
 - void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef rlt, CFAbsoluteTime fireDate) {}
   - 如果timer执行的rl不是当前的runloop，则调用```CFRunLoopWakeUp```手动唤醒rl
 
-唤醒runloop的代码:
+**除手动滑动runloop外，内核通过向port发送消息也可以自动唤醒runloop。**
 
-```objective-c
+### 手动唤醒runloop的代码
+
+```c
 void CFRunLoopWakeUp(CFRunLoopRef rl) {
-    CHECK_FOR_FORK();
-    // This lock is crucial to ignorable wakeups, do not remove it.
-    __CFRunLoopLock(rl);
-    if (__CFRunLoopIsIgnoringWakeUps(rl)) {
-        __CFRunLoopUnlock(rl);
-        return;
-    }
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-    kern_return_t ret;
-    /* We unconditionally try to send the message, since we don't want
-     * to lose a wakeup, but the send may fail if there is already a
-     * wakeup pending, since the queue length is 1. */
-    ret = __CFSendTrivialMachMessage(rl->_wakeUpPort, 0, MACH_SEND_TIMEOUT, 0);
-    if (ret != MACH_MSG_SUCCESS && ret != MACH_SEND_TIMED_OUT) CRASH("*** Unable to send message to wake up port. (%d) ***", ret);
-#elif DEPLOYMENT_TARGET_WINDOWS
-    SetEvent(rl->_wakeUpPort);
-#endif
-    __CFRunLoopUnlock(rl);
+    // ...
+    // __CFSendTrivialMachMessage内部调用mach_msg函数向runloop的wakeUpPort发送消息以唤醒runloop
+    kern_return_t ret = __CFSendTrivialMachMessage(rl->_wakeUpPort, 0, MACH_SEND_TIMEOUT, 0);
+  	// ..
 }
 ```
 
@@ -120,7 +155,7 @@ struct __CFRunLoopMode {
     CFMutableArrayRef _timers;	// 定时器数组
     CFMutableDictionaryRef _portToV1SourceMap;	 //字典  key是mach_port_t，value是CFRunLoopSourceRef
     __CFPortSet _portSet;	// 端口的集合。保存所有需要监听的port，比如_wakeUpPort，_timerPort都保存在这个数组中
-    CFIndex _observerMask;
+    CFIndex _observerMask; // 添加obsever时设置_observerMask为observer的_activities（CFRunLoopActivity状态）
 #if USE_DISPATCH_SOURCE_FOR_TIMERS
     dispatch_source_t _timerSource;
     dispatch_queue_t _queue;
@@ -131,17 +166,13 @@ struct __CFRunLoopMode {
     mach_port_t _timerPort;
     Boolean _mkTimerArmed;
 #endif
-#if DEPLOYMENT_TARGET_WINDOWS
-    DWORD _msgQMask;
-    void (*_msgPump)(void);
-#endif
     uint64_t _timerSoftDeadline; /* TSR */
     uint64_t _timerHardDeadline; /* TSR */
 };
 ```
 
 
-在Core Foundation中，针对Mode的操作，苹果只开放了以下3个API（ocoa中也有功能一样的函数，不再列出）：
+在Core Foundation中，针对Mode的操作，苹果只开放了以下3个API（cocoa中也有功能一样的函数，不再列出）：
 
 ```c
 CF_EXPORT CFStringRef CFRunLoopCopyCurrentMode(CFRunLoopRef rl); // 返回当前运行的mode的name
@@ -150,8 +181,6 @@ CF_EXPORT void CFRunLoopAddCommonMode(CFRunLoopRef rl, CFStringRef mode); // 向
 ```
 
 我们没有办法直接创建一个CFRunLoopMode对象，但是我们可以调用CFRunLoopAddCommonMode传入一个字符串向RunLoop中添加Mode，传入的字符串即为Mode的名字，Mode对象应该是此时在RunLoop内部创建的。
-
-
 
 # CFRunLoopSource
 
@@ -172,72 +201,32 @@ CF_EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
 - ```typedef struct __CFRunLoopSource * CFRunLoopSourceRef;```之所以定义在.h中，是为了给开发者提供创建并使用source的能力。
 - 一个source对应多个runloop。之所以使用CFMutableBagRef这种集合结构保存runloop而非array或set。主要原因是bag是无序的且允许重复。更多信息详见：https://developer.apple.com/documentation/corefoundation/cfbag-s1l
 
-Source0：source0是App内部事件，由App自己管理的，像UIEvent、CFSocket都是source0。当一个source0事件准备处理时，要先调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理，然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。这些框架已经帮我们做好了，像网络请求的回调、滑动触摸的回调，我们不需要自己处理。 
-
-Source0 ：自定义事件源，Source0 只包含了一个回调（函数指针），它并不能主动触发事件。使用时，你需要先调用 CFRunLoopSourceSignal(Source)，将这个 Source 标记为待处理，然后手动调用 CFRunLoopWakeUp(RunLoop) 来唤醒 RunLoop，让其处理这个事件。 
-
-```objective-c
+```c
 typedef struct __CFRunLoopSource * CFRunLoopSourceRef;	// 定义在.h文件中
 struct __CFRunLoopSource {
     CFRuntimeBase _base;
     uint32_t _bits;
     pthread_mutex_t _lock;
-    CFIndex _order;			/* immutable */
-    CFMutableBagRef _runLoops;  // 允许重复的集合。一个source对应多个runloop
+    CFIndex _order;			// souce的顺序（不可变）
+    CFMutableBagRef _runLoops;  // 集合（允许元素重复）说明一个source可以对应多个runloop
     union {
-				CFRunLoopSourceContext version0;	/* immutable, except invalidation */ // source0的结构体
-        CFRunLoopSourceContext1 version1;	/* immutable, except invalidation */ // source1的结构体
+				CFRunLoopSourceContext version0; // source0的结构体（不可变）
+        CFRunLoopSourceContext1 version1; // source1的结构体（不可变）
     } _context;
 };
 ```
 
 source对应的runloop是一个集合，说明source可以被添加到多个runloop中。
 
-## Source0
+## Source0和Source1区别
 
-```objective-c
-typedef struct {
-    CFIndex	version;
-    void *	info;
-    const void *(*retain)(const void *info);
-    void	(*release)(const void *info);
-    CFStringRef	(*copyDescription)(const void *info);
-    Boolean	(*equal)(const void *info1, const void *info2);
-    CFHashCode	(*hash)(const void *info);
-    void	(*schedule)(void *info, CFRunLoopRef rl, CFStringRef mode);
-    void	(*cancel)(void *info, CFRunLoopRef rl, CFStringRef mode);
-    void	(*perform)(void *info);
-} CFRunLoopSourceContext;	// source0的结构体
-```
+Source0：source0是App内部事件，由App自己管理的，像UIEvent、CFSocket都是source0。source0并不能主动触发事件，当一个source0事件准备处理时，要先调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理。然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。这些框架已经帮我们做好了，像网络请求的回调、滑动触摸的回调，我们不需要自己处理。 
 
+Source1：由RunLoop和内核管理，Mach port驱动，如CFMachPort、CFMessagePort。source1包含了一个 mach_port 和一个回调（函数指针），被用于通过内核和其他线程相互发送消息。这种 Source 能主动唤醒 RunLoop 的线程。
 
+source相关的函数
 
-## Source1
-
-```objective-c
-typedef struct {
-    CFIndex	version;
-    void *	info;
-    const void *(*retain)(const void *info);
-    void	(*release)(const void *info);
-    CFStringRef	(*copyDescription)(const void *info);
-    Boolean	(*equal)(const void *info1, const void *info2);
-    CFHashCode	(*hash)(const void *info);
-#if (TARGET_OS_MAC && !(TARGET_OS_EMBEDDED || TARGET_OS_IPHONE)) || (TARGET_OS_EMBEDDED || TARGET_OS_IPHONE)
-    mach_port_t	(*getPort)(void *info);
-    void *	(*perform)(void *msg, CFIndex size, CFAllocatorRef allocator, void *info);
-#else
-    void *	(*getPort)(void *info);
-    void	(*perform)(void *info);
-#endif
-} CFRunLoopSourceContext1;	// source1的结构体
-```
-
-
-
-source相关的函数：
-
-```objective-c
+```c
 Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName);
 void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName);
 void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName);
@@ -245,11 +234,11 @@ void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef 
 
 
 
-添加Source的源码：
+## 添加Source的源码
 
 作用：把source添加到对应mode的source0或source1集合中。只是这里区分了下source被指定的mode是否为commonMode，如果source被指定的mode是commonMode，还需要把source添加到runloop的commonModeItems集合中。
 
-```objective-c
+```c
 void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {	/* DOES CALLOUT */
     CHECK_FOR_FORK();
     if (__CFRunLoopIsDeallocating(rl)) return;
@@ -335,6 +324,8 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 
 
 # runLoop timer 
+
+**CFRunLoopTimerRef** 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。其包含一个时间长度和一个回调（函数指针）。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调。
 
 CFRunLoopTimer结构体实现：
 
@@ -535,7 +526,7 @@ void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef rlt, CFAbsoluteTime fireDat
 
 # runLoop observer
 
-Observer顾名思义，观察者，和我们设计模式中的观察者模式如出一辙。observer主要观察runloop的状态变化，然后执行一些回调函数。runloop主要有6种状态，如下：
+Observer顾名思义，观察者，和我们设计模式中的观察者模式如出一辙。每个 Observer 都包含了一个回调（函数指针），observer主要观察runloop的状态变化，然后执行回调函数。runloop可观察的状态主要有6种状态，如下：
 
 ```c
 // runloop的6种状态，用于通知observer runloop的状态变化
@@ -742,18 +733,17 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         rlm->_stopped = false;
         return kCFRunLoopRunStopped;
     }
-    
+    // 获取主线程接收消息的port备用。如果runLoop是mainRunLoop且后续内核唤醒的port等于主线程接收消息的port，主线程就处理这个消息
     mach_port_name_t dispatchPort = MACH_PORT_NULL;
     Boolean libdispatchQSafe = pthread_main_np() && ((HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && NULL == previousMode) || (!HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && 0 == _CFGetTSD(__CFTSDKeyIsInGCDMainQ)));
     if (libdispatchQSafe && (CFRunLoopGetMain() == rl) && CFSetContainsValue(rl->_commonModes, rlm->_name)) dispatchPort = _dispatch_get_main_queue_port_4CF();
     
 #if USE_DISPATCH_SOURCE_FOR_TIMERS
+    // 初始化获取timer的port(source1)
+    // 如果这个port和mach_msg发消息的livePort相等则说明timer时间到了，处理timer
     mach_port_name_t modeQueuePort = MACH_PORT_NULL;
     if (rlm->_queue) {
         modeQueuePort = _dispatch_runloop_root_queue_get_port_4CF(rlm->_queue);
-        if (!modeQueuePort) {
-            CRASH("Unable to get port for run loop mode queue (%d)", -1);
-        }
     }
 #endif
     
@@ -781,12 +771,24 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
     }
     
     Boolean didDispatchPortLastTime = true;
+    // returnValue 标识runloop状态，如果returnValue不为0就不退出。
+    // returnValue可能的值：
+    // enum {
+    //     kCFRunLoopRunFinished = 1,
+    //     kCFRunLoopRunStopped = 2,
+    //     kCFRunLoopRunTimedOut = 3,
+    //     kCFRunLoopRunHandledSource = 4
+    // };
+
     int32_t retVal = 0;
     do {
         voucher_mach_msg_state_t voucherState = VOUCHER_MACH_MSG_STATE_UNCHANGED;
         voucher_t voucherCopy = NULL;
+        // 消息缓冲区，用户缓存内核发的消息
         uint8_t msg_buffer[3 * 1024];
+        // 消息缓冲区指针，用于指向msg_buffer
         mach_msg_header_t *msg = NULL;
+        // 用于保存被内核唤醒的端口（调用mach_msg函数时会把livePort地址传进去供内核写数据）
         mach_port_t livePort = MACH_PORT_NULL;
         __CFPortSet waitSet = rlm->_portSet;
         
@@ -812,7 +814,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         
         if (MACH_PORT_NULL != dispatchPort && !didDispatchPortLastTime) {
             msg = (mach_msg_header_t *)msg_buffer;
-            // 5. 如果有 Source1 (基于port的source) 处于 ready 状态，直接处理这个 Source1 然后跳转去处理消息。
+            // 5. 如果有 Source1 (基于port的source) 处于 ready 状态，直接处理这个 Source1 然后跳转到第9步去处理消息。
             // __CFRunLoopServiceMachPort函数内部调用了mach_msg，mach_msg函数会监听内核给端口发送的消息
             // 如果mach_msg监听到消息就会执行goto跳转去处理这个消息
             if (__CFRunLoopServiceMachPort(dispatchPort, &msg, sizeof(msg_buffer), &livePort, 0, &voucherState, NULL)) {
@@ -823,6 +825,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         didDispatchPortLastTime = false;
         // 6. 通知 Observers: RunLoop 的线程即将进入休眠(sleep)。
         if (!poll && (rlm->_observerMask & kCFRunLoopBeforeWaiting)) __CFRunLoopDoObservers(rl, rlm, kCFRunLoopBeforeWaiting);
+        // runloop置为休眠状态
         __CFRunLoopSetSleeping(rl);
         // do not do any user callouts after this point (after notifying of sleeping)
         
@@ -846,8 +849,8 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             }
             msg = (mach_msg_header_t *)msg_buffer;
             // 7. __CFRunLoopServiceMachPort内部调用mach_msg函数等待接受mach_port的消息。随即线程将进入休眠，等待被唤醒。 以下事件会会唤醒runloop:
-            // mach_msg接收到来自内核的消息，本质上是内核向我们的port发送了一条消息。即收到一个基于port的Source事件（source1）。
-            // 一个timer到时间了（处理timer）
+            // mach_msg接收到来自内核的消息。本质上是内核向我们的port发送了一条消息。即收到一个基于port的Source事件（source1）。
+            // 一个timer的时间到了（处理timer）
             // RunLoop自身的超时时间到了（几乎不可能）
             // 被其他什么调用者手动唤醒（source0）
             __CFRunLoopServiceMachPort(waitSet, &msg, sizeof(msg_buffer), &livePort, poll ? 0 : TIMEOUT_INFINITY, &voucherState, &voucherCopy);
@@ -888,27 +891,31 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         // in there if this function returns.
         
         __CFPortSetRemove(dispatchPort, waitSet);
-        
+
         __CFRunLoopSetIgnoreWakeUps(rl);
-        
+        // runloop置为唤醒状态
         // user callouts now OK again
         __CFRunLoopUnsetSleeping(rl);
-        // 8. 通知 Observers: RunLoop 的线程刚刚被唤醒了。
+        // 8. 通知 Observers: RunLoop对应的线程刚被唤醒。
         if (!poll && (rlm->_observerMask & kCFRunLoopAfterWaiting)) __CFRunLoopDoObservers(rl, rlm, kCFRunLoopAfterWaiting);
-        // 收到消息，处理消息
+        // 9. 收到&处理source1消息（第5步的goto会到达这里开始处理source1）
     handle_msg:;
+        // 忽略端口唤醒runloop，避免在处理source1时通过其他线程或进程唤醒runloop(保证线程安全)
         __CFRunLoopSetIgnoreWakeUps(rl);
         
         if (MACH_PORT_NULL == livePort) {
+            // livePort为null则什么也不做
             CFRUNLOOP_WAKEUP_FOR_NOTHING();
             // handle nothing
         } else if (livePort == rl->_wakeUpPort) {
+            // livePort为wakeUpPort则只需要简单的唤醒runloop（rl->_wakeUpPort是专门用来唤醒runloop的）
             CFRUNLOOP_WAKEUP_FOR_WAKEUP();
         }
 #if USE_DISPATCH_SOURCE_FOR_TIMERS
         else if (modeQueuePort != MACH_PORT_NULL && livePort == modeQueuePort) {
             CFRUNLOOP_WAKEUP_FOR_TIMER();
-            /// 9.1 如果一个 Timer 到时间了，触发这个Timer的回调。
+            // 9.1 如果一个 Timer 到时间了，触发这个Timer的回调
+            // __CFRunLoopDoTimers返回值代表是否处理了这个timer
             if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {
                 // Re-arm the next timer, because we apparently fired early
                 __CFArmNextTimerInMode(rlm, rl);
@@ -932,7 +939,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             __CFRunLoopUnlock(rl);
             _CFSetTSD(__CFTSDKeyIsInGCDMainQ, (void *)6, NULL);
 
-            /// 9.2 如果有dispatch到main_queue的block，执行block。
+            /// 9.2 如果有dispatch到main_queue的block，执行block（也就是处理GCD通过port提交到主线程的事件）。
             __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__(msg);
             _CFSetTSD(__CFTSDKeyIsInGCDMainQ, (void *)0, NULL);
             __CFRunLoopLock(rl);
@@ -945,12 +952,14 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             // If we received a voucher from this mach_msg, then put a copy of the new voucher into TSD. CFMachPortBoost will look in the TSD for the voucher. By using the value in the TSD we tie the CFMachPortBoost to this received mach_msg explicitly without a chance for anything in between the two pieces of code to set the voucher again.
             voucher_t previousVoucher = _CFSetTSD(__CFTSDKeyMachMessageHasVoucher, (void *)voucherCopy, os_release);
             /// 9.3 如果一个 Source1 (基于port) 发出事件了，处理这个事件
-            // Despite the name, this works for windows handles as well
+            // 根据livePort获取source（不需要name，从mode->_portToV1SourceMap字典中以port作为key即可取到source）
             CFRunLoopSourceRef rls = __CFRunLoopModeFindSourceForMachPort(rl, rlm, livePort);
             if (rls) {
                 mach_msg_header_t *reply = NULL;
-                // runloop 触发source1的回调
+                // 处理source1事件（触发source1的回调）
+                // runloop 触发source1的回调，__CFRunLoopDoSource1内部会调用__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__
                 sourceHandledThisLoop = __CFRunLoopDoSource1(rl, rlm, rls, msg, msg->msgh_size, &reply) || sourceHandledThisLoop;
+                // 如果__CFRunLoopDoSource1响应的数据reply不为空则通过mach_msg 再send给内核
                 if (NULL != reply) {
                     (void)mach_msg(reply, MACH_SEND_MSG, reply->msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
                     CFAllocatorDeallocate(kCFAllocatorSystemDefault, reply);
@@ -967,25 +976,26 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         
         if (sourceHandledThisLoop && stopAfterHandle) {
             /// 进入loop时参数说处理完事件就返回。
-            retVal = kCFRunLoopRunHandledSource;
+            retVal = kCFRunLoopRunHandledSource; // 4
         } else if (timeout_context->termTSR < mach_absolute_time()) {
             /// 超出传入参数标记的超时时间了
-            retVal = kCFRunLoopRunTimedOut;
+            retVal = kCFRunLoopRunTimedOut; // 3
         } else if (__CFRunLoopIsStopped(rl)) {
             /// 被外部调用者强制停止了
-            __CFRunLoopUnsetStopped(rl);
+            __CFRunLoopUnsetStopped(rl); // 2
             retVal = kCFRunLoopRunStopped;
         } else if (rlm->_stopped) {
+            // mode stop
             rlm->_stopped = false;
-            retVal = kCFRunLoopRunStopped;
+            retVal = kCFRunLoopRunStopped; // 2
         } else if (__CFRunLoopModeIsEmpty(rl, rlm, previousMode)) {
             /// source/timer/observer一个都没有了
-            retVal = kCFRunLoopRunFinished;
+            retVal = kCFRunLoopRunFinished; // 1
         }
         
         voucher_mach_msg_revert(voucherState);
         os_release(voucherCopy);
-        /// 如果没超时，mode里没空，loop也没被停止，那继续loop
+        /// 如果没超时，mode不是空，loop也没被停止，那继续loop
     } while (0 == retVal);
     
     if (timeout_timer) {
@@ -1000,6 +1010,10 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 ```
 
 
+
+# 总结
+
+一句话概括runLoop：一个有状态的事件驱动的do...while循环。
 
 # 参考文章
 
