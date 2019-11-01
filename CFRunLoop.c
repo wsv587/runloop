@@ -885,7 +885,7 @@ CF_INLINE void __CFUnsetValid(void *cf) {
 
 struct __CFRunLoopSource {
     CFRuntimeBase _base;
-    uint32_t _bits;
+    uint32_t _bits; // 位域，标记source状态
     pthread_mutex_t _lock;
     CFIndex _order;			/* immutable */
     CFMutableBagRef _runLoops;  // 一个source对应多个runloop
@@ -993,7 +993,7 @@ static void __CFRunLoopObserverCancel(CFRunLoopObserverRef rlo, CFRunLoopRef rl,
 // 其包含一个时间长度和一个函数回调。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调
 struct __CFRunLoopTimer {
     CFRuntimeBase _base;
-    uint16_t _bits;					// 标记fire状态
+    uint16_t _bits;					// 位域，标记fire状态
     pthread_mutex_t _lock;
     CFRunLoopRef _runLoop;			// timer所处的runloop
     CFMutableSetRef _rlModes;		// 存放所有 包含该timer的 mode的 modeName，意味着一个timer可能会在多个mode中存在
@@ -1766,6 +1766,7 @@ static Boolean __CFRunLoopDoSources0(CFRunLoopRef rl, CFRunLoopModeRef rlm, Bool
 	if (CFGetTypeID(sources) == CFRunLoopSourceGetTypeID()) {
 	    CFRunLoopSourceRef rls = (CFRunLoopSourceRef)sources;
 	    __CFRunLoopSourceLock(rls);
+        // 获取source0是否为待处理状态
             if (__CFRunLoopSourceIsSignaled(rls)) {
 	        __CFRunLoopSourceUnsetSignaled(rls);
 	        if (__CFIsValid(rls)) {
@@ -1787,6 +1788,7 @@ static Boolean __CFRunLoopDoSources0(CFRunLoopRef rl, CFRunLoopModeRef rlm, Bool
 	    for (CFIndex idx = 0; idx < cnt; idx++) {
 		CFRunLoopSourceRef rls = (CFRunLoopSourceRef)CFArrayGetValueAtIndex((CFArrayRef)sources, idx);
 		__CFRunLoopSourceLock(rls);
+            // 获取source0是否为待处理状态
                 if (__CFRunLoopSourceIsSignaled(rls)) {
 		    __CFRunLoopSourceUnsetSignaled(rls);
 		    if (__CFIsValid(rls)) {
@@ -2037,6 +2039,7 @@ static Boolean __CFRunLoopDoTimer(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFRunLo
             context_info = rlt->_context.info;
         }
         Boolean doInvalidate = (0.0 == rlt->_interval);
+        // timer标记为待处理状态
 	__CFRunLoopTimerSetFiring(rlt);
         // Just in case the next timer has exactly the same deadlines as this one, we reset these values so that the arm next timer code can correctly find the next timer in the list and arm the underlying timer.
         rlm->_timerSoftDeadline = UINT64_MAX;
@@ -3253,11 +3256,7 @@ static CFStringRef __CFRunLoopSourceCopyDescription(CFTypeRef cf) {	/* DOES CALL
 	contextDesc = CFStringCreateWithFormat(kCFAllocatorSystemDefault, NULL, CFSTR("<CFRunLoopSource context>{version = %ld, info = %p, callout = %s (%p)}"), rls->_context.version0.version, rls->_context.version0.info, name, addr);
 #endif
     }
-#if DEPLOYMENT_TARGET_WINDOWS
-    result = CFStringCreateWithFormat(kCFAllocatorSystemDefault, NULL, CFSTR("<CFRunLoopSource %p [%p]>{signalled = %s, valid = %s, order = %d, context = %@}"), cf, CFGetAllocator(rls), __CFRunLoopSourceIsSignaled(rls) ? "Yes" : "No", __CFIsValid(rls) ? "Yes" : "No", rls->_order, contextDesc);
-#else
     result = CFStringCreateWithFormat(kCFAllocatorSystemDefault, NULL, CFSTR("<CFRunLoopSource %p [%p]>{signalled = %s, valid = %s, order = %ld, context = %@}"), cf, CFGetAllocator(rls), __CFRunLoopSourceIsSignaled(rls) ? "Yes" : "No", __CFIsValid(rls) ? "Yes" : "No", (unsigned long)rls->_order, contextDesc);
-#endif
     CFRelease(contextDesc);
     return result;
 }
@@ -3403,11 +3402,12 @@ void CFRunLoopSourceGetContext(CFRunLoopSourceRef rls, CFRunLoopSourceContext *c
     }
     memmove(context, &rls->_context, size);
 }
-
+// 把source0标记为待处理状态
 void CFRunLoopSourceSignal(CFRunLoopSourceRef rls) {
     CHECK_FOR_FORK();
     __CFRunLoopSourceLock(rls);
     if (__CFIsValid(rls)) {
+        // rls->_bits标记为待处理状态
 	__CFRunLoopSourceSetSignaled(rls);
     }
     __CFRunLoopSourceUnlock(rls);
