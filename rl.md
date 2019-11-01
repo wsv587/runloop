@@ -322,7 +322,7 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 
 ##  CFRunLoopSourceSignal源码
 
-上面已经说过，source0并不能主动触发事件，当一个source0事件准备处理时，要先调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理。然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。如果source0被标记为待处理状态，那么runloop在执行source0（doSource0）时会处理source0事件。接下来我们看下CFRunLoopSourceSignal的源码：
+上面已经说过，source0并不能主动触发事件，当一个source0事件准备处理时，要先手动调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理。然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。在runloop被唤醒后，如果source0被标记为待处理状态，那么runloop在执行source0（doSource0）时就会处理source0事件。接下来我们看下CFRunLoopSourceSignal的源码：
 
 ```c
 // 把source0标记为待处理状态
@@ -337,6 +337,8 @@ CF_INLINE void __CFRunLoopSourceSetSignaled(CFRunLoopSourceRef rls) {
 }
 ```
 
+获取source0状态的代码此处省略。
+
 上面CFRunLoopSourceSignal调用了\__CFRunLoopSourceSetSignaled函数，\_\_CFRunLoopSourceSetSignaled函数内部设置了rls->bits的bitfiled（位域）。对于位域不了解的同学可以自行百度，[这里](https://baike.baidu.com/item/bitfield/2007712?fr=aladdin)是百度百科的解释。
 
 同理timer也有一个同样的位域标记位来标记timer是否需要被处理。如果timer被标记为待触发状态，那么runloop在执行timer（doTimer）是会触发timer事件。
@@ -345,7 +347,7 @@ CF_INLINE void __CFRunLoopSourceSetSignaled(CFRunLoopSourceRef rls) {
 
 # runLoop timer 
 
-**CFRunLoopTimerRef** 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。其包含一个时间长度和一个回调（函数指针）。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调。
+**CFRunLoopTimerRef** 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。其包含一个时间长度和一个回调（函数指针）。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当达到对应的时间点时，RunLoop会被唤醒以执行那个回调。
 
 CFRunLoopTimer结构体实现：
 
@@ -424,6 +426,38 @@ void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef rlt, CFStringRef modeN
     }
 }
 ```
+
+
+
+## 执行timer的源码
+
+```c
+static Boolean __CFRunLoopDoTimers(CFRunLoopRef rl, CFRunLoopModeRef rlm, uint64_t limitTSR) {	/* DOES CALLOUT */
+    Boolean timerHandled = false;
+    CFMutableArrayRef timers = NULL;
+    // 获取timer数组
+    for (CFIndex idx = 0, cnt = rlm->_timers ? CFArrayGetCount(rlm->_timers) : 0; idx < cnt; idx++) {
+        CFRunLoopTimerRef rlt = (CFRunLoopTimerRef)CFArrayGetValueAtIndex(rlm->_timers, idx);
+        
+        if (__CFIsValid(rlt) && !__CFRunLoopTimerIsFiring(rlt)) {
+            if (rlt->_fireTSR <= limitTSR) {
+                if (!timers) timers = CFArrayCreateMutable(kCFAllocatorSystemDefault, 0, &kCFTypeArrayCallBacks);
+                CFArrayAppendValue(timers, rlt);
+            }
+        }
+    }
+    // 执行timer
+    for (CFIndex idx = 0, cnt = timers ? CFArrayGetCount(timers) : 0; idx < cnt; idx++) {
+        CFRunLoopTimerRef rlt = (CFRunLoopTimerRef)CFArrayGetValueAtIndex(timers, idx);
+        Boolean did = __CFRunLoopDoTimer(rl, rlm, rlt);
+        timerHandled = timerHandled || did;
+    }
+    if (timers) CFRelease(timers);
+    return timerHandled;
+}
+```
+
+
 
 
 
