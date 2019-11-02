@@ -12,6 +12,10 @@ runloop顾名思义就是”跑圈“，所谓跑圈就给人一种循环的感�
 - 有顺序的处理各种Event。因为runLoop有状态，可以决定线程在什么时候处理什么事件
 - 节省CPU资源。通常情况下，事件并不是永无休止的产生，所以也就没必要让线程永无休止的运行。runloop可以在无事件处理时进入休眠状态，避免无休止的do...while跑空圈。
 
+
+
+不得不重复那句老生常谈的话：一个线程对应一个RunLoop，程序运行是主线程的RunLoop默认启动，子线程的RunLoop按需启动（调用run方法）。runloop是线程的事件管理者，或者说是线程的事件管家，他会按照顺序管理线程要处理的事件，决定哪些事件在什么时候提交给主线程处理。
+
 # 无处不在的runLoop
 
 <img src="/Users/wangsong/Library/Application Support/typora-user-images/image-20191026150209717.png" alt="image-20191026150209717" style="zoom:50%;" />
@@ -52,25 +56,20 @@ runLoop的结构如下图所示：
 
 ## RunLoop结构体定义
 
+注意：为了减少篇幅、避免困惑，本篇文章的源码稍有精简.
+
 ```c
 // RunLoop的结构体定义
 struct __CFRunLoop {
-    CFRuntimeBase _base;
-    pthread_mutex_t _lock;			/* locked for accessing mode list */
+    pthread_mutex_t _lock;			// 访问mode集合时用到的锁
     __CFPort _wakeUpPort;			// 手动唤醒runloop的端口。初始化runloop时设置，仅用于CFRunLoopWakeUp，CFRunLoopWakeUp函数会向_wakeUpPort发送一条消息
-    Boolean _unused;
-    volatile _per_run_data *_perRunData;              // reset for runs of the run loop
     pthread_t _pthread;					// 对应的线程
-    uint32_t _winthread;
     CFMutableSetRef _commonModes;		// 集合，存储的是字符串，记录所有标记为common的modeName
     CFMutableSetRef _commonModeItems;   // 存储所有commonMode的sources、timers、observers
     CFRunLoopModeRef _currentMode;		// 当前modeName
     CFMutableSetRef _modes;				// 集合，存储的是CFRunLoopModeRef
     struct _block_item *_blocks_head;   // 链表头指针，该链表保存了所有需要被runloop执行的block。外部通过调用CFRunLoopPerformBlock函数来向链表中添加一个block节点。runloop会在CFRunLoopDoBlock时遍历该链表，逐一执行block
     struct _block_item *_blocks_tail;   // 链表尾指针，之所以有尾指针，是为了降低增加block时的时间复杂度
-    CFAbsoluteTime _runTime;
-    CFAbsoluteTime _sleepTime;
-    CFTypeRef _counterpart;
 };
 ```
 
@@ -139,8 +138,6 @@ static uint32_t __CFSendTrivialMachMessage(mach_port_t port, uint32_t msg_id, CF
 }
 ```
 
-
-
 # CFRunLoopMode
 
 下面是CFRunLoopMode的结构体定义，从RLM的定义不难看出以下信息：
@@ -157,11 +154,8 @@ static uint32_t __CFSendTrivialMachMessage(mach_port_t port, uint32_t msg_id, CF
 typedef struct __CFRunLoopMode *CFRunLoopModeRef;
 
 struct __CFRunLoopMode {
-    CFRuntimeBase _base;
-    pthread_mutex_t _lock;	/* must have the run loop locked before locking this */
     CFStringRef _name;	// mode名字
     Boolean _stopped;	  // mode的状态，标识mode是否停止
-    char _padding[3];
     CFMutableSetRef _sources0;	// sources0事件集合
     CFMutableSetRef _sources1;	// sources1事件集合
     CFMutableArrayRef _observers;	// 观察者数组
@@ -169,18 +163,6 @@ struct __CFRunLoopMode {
     CFMutableDictionaryRef _portToV1SourceMap;	 //字典。key是mach_port_t，value是CFRunLoopSourceRef
     __CFPortSet _portSet;	// 端口的集合。保存所有需要监听的port，比如_wakeUpPort，_timerPort都保存在这个数组中
     CFIndex _observerMask; // 添加obsever时设置_observerMask为observer的_activities（CFRunLoopActivity状态）
-#if USE_DISPATCH_SOURCE_FOR_TIMERS
-    dispatch_source_t _timerSource;
-    dispatch_queue_t _queue;
-    Boolean _timerFired; // set to true by the source when a timer has fired
-    Boolean _dispatchTimerArmed;
-#endif
-#if USE_MK_TIMER_TOO
-    mach_port_t _timerPort;
-    Boolean _mkTimerArmed;
-#endif
-    uint64_t _timerSoftDeadline; /* TSR */
-    uint64_t _timerHardDeadline; /* TSR */
 };
 ```
 
@@ -217,9 +199,6 @@ CF_EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
 ```c
 typedef struct __CFRunLoopSource * CFRunLoopSourceRef;	// 定义在.h文件中
 struct __CFRunLoopSource {
-    CFRuntimeBase _base;
-    uint32_t _bits;
-    pthread_mutex_t _lock;
     CFIndex _order;			// souce的顺序（不可变）
     CFMutableBagRef _runLoops;  // 集合（允许元素重复）说明一个source可以对应多个runloop
     union {
@@ -318,10 +297,6 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 }
 ```
 
-
-
-
-
 # runLoop timer 
 
 **CFRunLoopTimerRef** 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。其包含一个时间长度和一个回调（函数指针）。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调。
@@ -332,18 +307,13 @@ CFRunLoopTimer结构体实现：
 // CFRunLoopTimerRef 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。
 // 其包含一个时间长度和一个函数回调。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调
 struct __CFRunLoopTimer {
-    CFRuntimeBase _base;
     uint16_t _bits;					// 标记fire状态
-    pthread_mutex_t _lock;
     CFRunLoopRef _runLoop;			// timer所处的runloop
-    CFMutableSetRef _rlModes;		// 集合。存放所有包含该timer的mode的modeName，意味着一个timer可能会在多个mode中存在
+    CFMutableSetRef _rlModes;		// mode集合。存放所有包含该timer的mode的modeName，意味着一个timer可能会在多个mode中存在
     CFAbsoluteTime _nextFireDate;	// 下次触发时间
     CFTimeInterval _interval;		// 理想时间间隔(不可变)
     CFTimeInterval _tolerance;      // 允许的误差(可变)
-    uint64_t _fireTSR;			/* TSR units */
-    CFIndex _order;			/* immutable */
-    CFRunLoopTimerCallBack _callout;// timer回调	/* immutable */
-    CFRunLoopTimerContext _context;	/* immutable, except invalidation */
+    CFRunLoopTimerCallBack _callout;// timer回调
 };
 ```
 
@@ -548,15 +518,12 @@ CF_EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef obs
 
 ## 添加Observer源码
 
+备注：以下代码存在精简
+
 ```objective-c
 void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef rlo, CFStringRef modeName) {
-    CHECK_FOR_FORK();
-    CFRunLoopModeRef rlm;
-    if (__CFRunLoopIsDeallocating(rl)) return;
-    if (!__CFIsValid(rlo) || (NULL != rlo->_runLoop && rlo->_runLoop != rl)) return;
-    __CFRunLoopLock(rl);
     if (modeName == kCFRunLoopCommonModes) {
-            // 导出runloop的commonModes
+        // 导出runloop的commonModes
 	CFSetRef set = rl->_commonModes ? CFSetCreateCopy(kCFAllocatorSystemDefault, rl->_commonModes) : NULL;
         // 创建commonModeItems
 	if (NULL == rl->_commonModeItems) {
@@ -568,7 +535,6 @@ void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef rlo, CFStringRef
 	    CFTypeRef context[2] = {rl, rlo};
         // 添加observer到所有被标记为commonMode的mode中
 	    CFSetApplyFunction(set, (__CFRunLoopAddItemToCommonModes), (void *)context);
-	    CFRelease(set);
 	}
     } else {
 	rlm = __CFRunLoopFindMode(rl, modeName, true);
@@ -598,6 +564,57 @@ void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef rlo, CFStringRef
     }
     __CFRunLoopUnlock(rl);
 }
+```
+
+
+
+## 自定义Observer来监听runloop状态变化
+
+```c
+    // 0.创建一个监听对象
+    /*
+     第一个参数: 告诉系统如何给Observer对象分配存储空间
+     第二个参数: 需要监听的状态类型
+     第三个参数: 是否需要重复监听
+     第四个参数: 优先级
+     第五个参数: 监听到对应的状态之后的回调
+     */
+    CFRunLoopObserverRef observer =  CFRunLoopObserverCreateWithHandler(CFAllocatorGetDefault(), kCFRunLoopAllActivities, YES, 0, ^(CFRunLoopObserverRef observer, CFRunLoopActivity activity) {
+        switch (activity) {
+            case kCFRunLoopEntry:
+                NSLog(@"即将进入RunLoop");
+                break;
+            case kCFRunLoopBeforeTimers:
+                NSLog(@"即将处理timer");
+                break;
+            case kCFRunLoopBeforeSources:
+                NSLog(@"即将处理source");
+                break;
+            case kCFRunLoopBeforeWaiting:
+                NSLog(@"即将进入休眠");
+                break;
+            case kCFRunLoopAfterWaiting:
+                NSLog(@"从休眠中被唤醒");
+                break;
+            case kCFRunLoopExit:
+                NSLog(@"即将退出RunLoop");
+                break;
+                
+            default:
+                break;
+        }
+    });
+    
+    // 1.给主线程的RunLoop添加监听
+    /*
+     第一个参数:需要监听的RunLoop对象
+     第二个参数:给指定的RunLoop对象添加的监听对象
+     第三个参数:在那种模式下监听
+     */
+    CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+    
+    // 如果通过scheduled方法创建NSTimer, 系统会默认添加到当前线程的默认模式下
+    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(demo) userInfo:nil repeats:YES];
 ```
 
 
@@ -935,7 +952,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 
 # 主线程RunLoop和GCD的关系
 
-当调用 dispatch_async(dispatch_get_main_queue(), block) 时，libDispatch  会向主线程的 RunLoop 发送消息，RunLoop会被唤醒，并从消息中取得这个 block，并在回调  __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__() 里执行这个  block。但这个逻辑仅限于 dispatch 到主线程，dispatch 到其他线程仍然是由 libDispatch 处理的。
+当调用 dispatch_async(dispatch_get_main_queue(), block) 时，libDispatch  会向主线程的 RunLoop 发送消息，RunLoop会被唤醒，并从消息中取得这个 block，并在回调  __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__() 里执行这个  block。但这个逻辑仅限于 dispatch 到主线程，dispatch 到其他线程仍然是由 libDispatch 处理的。那么你肯定会问：为什么子线程没有这个和GCD交互的逻辑？猜测原因有二：
+
+- 主线程runloop是主线程的事件管理者，runloop负责何时让runloop处理何种事件。所有分发个主线程的任务必须统一交给主线程runloop排队处理。举例：UI操作只能在主线程，不在主线程操作UI会带来很多UI错乱问题以及UI更新延迟问题。
+
+- 子线程不接受GCD的交互。因为子线程比一定会有runloop。
 
 # 总结
 
