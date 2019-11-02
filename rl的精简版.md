@@ -96,6 +96,79 @@ CF_EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CF
 
 
 
+## RunLoop与线程关系
+
+```c
+// 取主线程的RunLoop
+CFRunLoopRef CFRunLoopGetMain(void) {
+    CHECK_FOR_FORK();
+    static CFRunLoopRef __main = NULL; // no retain needed
+    // 传入主线程
+    if (!__main) __main = _CFRunLoopGet0(pthread_main_thread_np()); // no CAS needed
+    return __main;
+}
+```
+
+下面这段代码可以看出：
+
+- RunLoop和线程的一一对应的，对应的方式是以key-value的方式保存在一个全局字典中
+- 主线程的RunLoop会在初始化全局字典时创建
+- 子线程的RunLoop会在第一次获取的时候创建，如果不获取的话就一直不会被创建
+- RunLoop会在线程销毁时销毁
+
+```c
+// 获取线程对应的runloop最终调用的核心函数
+// should only be called by Foundation
+// t==0 is a synonym for "main thread" that always works
+CF_EXPORT CFRunLoopRef _CFRunLoopGet0(pthread_t t) {
+	// 线程t为空则默认返回主线程runloop
+    if (pthread_equal(t, kNilPthreadT)) {
+	t = pthread_main_thread_np();
+    }
+    __CFLock(&loopsLock);
+    if (!__CFRunLoops) {
+        __CFUnlock(&loopsLock);
+        // 创建一个用于映射线程和runloop关系的字典
+	CFMutableDictionaryRef dict = CFDictionaryCreateMutable(kCFAllocatorSystemDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
+	// 主线程runloop
+	CFRunLoopRef mainLoop = __CFRunLoopCreate(pthread_main_thread_np());
+	// 保存main runloop，main_thread为key，main runloop为value
+	CFDictionarySetValue(dict, pthreadPointer(pthread_main_thread_np()), mainLoop);
+	if (!OSAtomicCompareAndSwapPtrBarrier(NULL, dict, (void * volatile *)&__CFRunLoops)) {
+	    CFRelease(dict);
+	}
+	CFRelease(mainLoop);
+        __CFLock(&loopsLock);
+    }
+    // 根据线程去字典中获取缓存的runloop
+    CFRunLoopRef loop = (CFRunLoopRef)CFDictionaryGetValue(__CFRunLoops, pthreadPointer(t));
+    __CFUnlock(&loopsLock);
+    // 未查找到缓存则创建一个runloop兵缓存在字典中
+    if (!loop) {
+	CFRunLoopRef newLoop = __CFRunLoopCreate(t);
+        __CFLock(&loopsLock);
+	loop = (CFRunLoopRef)CFDictionaryGetValue(__CFRunLoops, pthreadPointer(t));
+	if (!loop) {
+	    CFDictionarySetValue(__CFRunLoops, pthreadPointer(t), newLoop);
+	    loop = newLoop;
+	}
+        // don't release run loops inside the loopsLock, because CFRunLoopDeallocate may end up taking it
+        __CFUnlock(&loopsLock);
+	CFRelease(newLoop);
+    }
+    if (pthread_equal(t, pthread_self())) {
+        _CFSetTSD(__CFTSDKeyRunLoop, (void *)loop, NULL);
+        if (0 == _CFGetTSD(__CFTSDKeyRunLoopCntr)) {
+        	// 注册一个回调，当线程销毁时，销毁对应的RunLoop
+            _CFSetTSD(__CFTSDKeyRunLoopCntr, (void *)(PTHREAD_DESTRUCTOR_ITERATIONS-1), (void (*)(void *))__CFFinalizeRunLoop);
+        }
+    }
+    return loop;
+}
+```
+
+
+
 ## 手动唤醒runloop的方式
 
 - static void __CFRunLoopTimeout(void *arg) {}
@@ -632,7 +705,6 @@ CFRunLoopRunSpecific源码：
 SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterval seconds, Boolean returnAfterSourceHandled) {     /* DOES CALLOUT */
 		// 如果runloop正在销毁则直接返回finish
     if (__CFRunLoopIsDeallocating(rl)) return kCFRunLoopRunFinished;
-    __CFRunLoopLock(rl);
     // 根据指定的modeName获取指定的mode，也就是将要运行的mode
     CFRunLoopModeRef currentMode = __CFRunLoopFindMode(rl, modeName, false);
     // 出现以下情况就不会return finish：
@@ -663,11 +735,7 @@ SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterva
 	result = __CFRunLoopRun(rl, currentMode, seconds, returnAfterSourceHandled, previousMode);
 	// 10.通知observer即将退出runloop
 	if (currentMode->_observerMask & kCFRunLoopExit ) __CFRunLoopDoObservers(rl, currentMode, kCFRunLoopExit);
-
-        __CFRunLoopModeUnlock(currentMode);
-        __CFRunLoopPopPerRunData(rl, previousPerRun);
 	rl->_currentMode = previousMode;
-    __CFRunLoopUnlock(rl);
     return result;
 }
 ```
@@ -685,7 +753,7 @@ SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterva
 static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInterval seconds, Boolean stopAfterHandle, CFRunLoopModeRef previousMode) {
     // 获取基于系统启动后的时钟"嘀嗒"数，其单位是纳秒
     uint64_t startTSR = mach_absolute_time();
-    
+    // 状态判断
     if (__CFRunLoopIsStopped(rl)) {
         __CFRunLoopUnsetStopped(rl);
         return kCFRunLoopRunStopped;
@@ -854,7 +922,6 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             // 9.1 如果一个 Timer 到时间了，触发这个Timer的回调
             // __CFRunLoopDoTimers返回值代表是否处理了这个timer
             if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {
-                // Re-arm the next timer, because we apparently fired early
                 __CFArmNextTimerInMode(rlm, rl);
             }
         }
@@ -863,7 +930,6 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         else if (rlm->_timerPort != MACH_PORT_NULL && livePort == rlm->_timerPort) {
             CFRUNLOOP_WAKEUP_FOR_TIMER();
             if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {
-                // Re-arm the next timer
                 __CFArmNextTimerInMode(rlm, rl);
             }
         }
@@ -931,15 +997,47 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 
 # 主线程RunLoop和GCD的关系
 
-当调用 dispatch_async(dispatch_get_main_queue(), block) 时，libDispatch  会向主线程的 RunLoop 发送消息，RunLoop会被唤醒，并从消息中取得这个 block，并在回调  __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__() 里执行这个  block。但这个逻辑仅限于 dispatch 到主线程，dispatch 到其他线程仍然是由 libDispatch 处理的。那么你肯定会问：为什么子线程没有这个和GCD交互的逻辑？猜测原因有二：
+当调用 dispatch_async(dispatch_get_main_queue(), block) 时，libDispatch  会向主线程的 RunLoop 发送消息，RunLoop会被唤醒，并从消息中取得这个 block，并在回调  __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__() 里执行这个  block。但这个逻辑仅限于 dispatch 到主线程，dispatch 到其他线程仍然是由 libDispatch 处理的。那么你肯定会问：为什么子线程没有这个和GCD交互的逻辑？原因有二：
 
-- 主线程runloop是主线程的事件管理者，runloop负责何时让runloop处理何种事件。所有分发个主线程的任务必须统一交给主线程runloop排队处理。举例：UI操作只能在主线程，不在主线程操作UI会带来很多UI错乱问题以及UI更新延迟问题。
+- 主线程runloop是主线程的事件管理者。runloop负责何时让runloop处理何种事件。所有分发个主线程的任务必须统一交给主线程runloop排队处理。举例：UI操作只能在主线程，不在主线程操作UI会带来很多UI错乱问题以及UI更新延迟问题。
 
-- 子线程不接受GCD的交互。因为子线程比一定会有runloop。
+- 子线程不接受GCD的交互。因为子线程不一定会有runloop。
+
+
+
+# RunLoop应用
+
+## Timer
+
+
+
+## 线程保活
+
+AFNetworking2.0的常驻线程
+
+
+
+## 卡顿监控
+
+
+
+## 异步绘制
+
+
+
+## reloadData
+
+
+
+
+
+
 
 # 总结
 
 一句话概括runLoop：一个有状态的事件驱动的do...while循环。
+
+
 
 # 参考文章
 
