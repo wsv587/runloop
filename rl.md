@@ -42,7 +42,7 @@ runLoop的结构如下图所示：
   - 另一个好处是这样可以在不同的mode下执行不同的代码，避免上层业务代码相互影响。
   - 多个mode以及mode的切换是iOS app滑动顺畅的关键。
   - 主线程中不同的代码指定在不同的mode下运行可以提高app的流畅度。
-- 每个runLoopSource包括若干个runLoopSource、若干个runLoopTimer、若干个runLoopObserver。
+- 每个runLoopMode包括若干个runLoopSource、若干个runLoopTimer、若干个runLoopObserver。统称为item。
 
 
 
@@ -76,7 +76,7 @@ struct __CFRunLoop {
 
 
 
-
+## RunLoop操作item
 
 ```c
 // source相关操作
@@ -218,7 +218,7 @@ CF_EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source,
 typedef struct __CFRunLoopSource * CFRunLoopSourceRef;	// 定义在.h文件中
 struct __CFRunLoopSource {
     CFRuntimeBase _base;
-    uint32_t _bits;
+    uint32_t _bits;	// 位域，标记source状态
     pthread_mutex_t _lock;
     CFIndex _order;			// souce的顺序（不可变）
     CFMutableBagRef _runLoops;  // 集合（允许元素重复）说明一个source可以对应多个runloop
@@ -320,20 +320,41 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 
 
 
+##  CFRunLoopSourceSignal源码
+
+上面已经说过，source0并不能主动触发事件，当一个source0事件准备处理时，要先手动调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理。然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。在runloop被唤醒后，如果source0被标记为待处理状态，那么runloop在执行source0（doSource0）时就会处理source0事件。接下来我们看下CFRunLoopSourceSignal的源码：
+
+```c
+// 把source0标记为待处理状态
+void CFRunLoopSourceSignal(CFRunLoopSourceRef rls) {
+    if (__CFIsValid(rls)) {
+	__CFRunLoopSourceSetSignaled(rls);
+    }
+}
+// rls->_bits位域标记为待处理状态
+CF_INLINE void __CFRunLoopSourceSetSignaled(CFRunLoopSourceRef rls) {
+    __CFBitfieldSetValue(rls->_bits, 1, 1, 1);
+}
+```
+
+获取source0状态的代码此处省略。
+
+上面CFRunLoopSourceSignal调用了\__CFRunLoopSourceSetSignaled函数，\_\_CFRunLoopSourceSetSignaled函数内部设置了rls->bits的bitfiled（位域）。对于位域不了解的同学可以自行百度，[这里](https://baike.baidu.com/item/bitfield/2007712?fr=aladdin)是百度百科的解释。
+
+同理timer也有一个同样的位域标记位来标记timer是否需要被处理。如果timer被标记为待触发状态，那么runloop在执行timer（doTimer）是会触发timer事件。
+
 
 
 # runLoop timer 
 
-**CFRunLoopTimerRef** 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。其包含一个时间长度和一个回调（函数指针）。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调。
+**CFRunLoopTimerRef** 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。其包含一个时间长度和一个回调（函数指针）。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当达到对应的时间点时，RunLoop会被唤醒以执行那个回调。
 
 CFRunLoopTimer结构体实现：
 
 ```c
-// CFRunLoopTimerRef 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。
-// 其包含一个时间长度和一个函数回调。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调
 struct __CFRunLoopTimer {
     CFRuntimeBase _base;
-    uint16_t _bits;					// 标记fire状态
+    uint16_t _bits;					// 位域，标记timer是否为待处理状态
     pthread_mutex_t _lock;
     CFRunLoopRef _runLoop;			// timer所处的runloop
     CFMutableSetRef _rlModes;		// 集合。存放所有包含该timer的mode的modeName，意味着一个timer可能会在多个mode中存在
@@ -349,19 +370,7 @@ struct __CFRunLoopTimer {
 
 和source不同，timer对应的runloop是一个runloop指针，而非数组，所以此处说明一个timer只能添加到一个runloop。
 
-
-
-主要函数：
-
-```c
-CF_EXPORT Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFRunLoopMode mode);
-```
-
-
-
-添加timer源码：
+## 添加timer源码
 
 作用：添加timer到rl->commonModeItems中，添加timer到runloopMode中，根据触发时间调整timer在runloopMode->timers数组中的位置。
 
@@ -420,7 +429,39 @@ void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef rlt, CFStringRef modeN
 
 
 
-设置timer下次触发时间的源码：
+## 执行timer的源码
+
+```c
+static Boolean __CFRunLoopDoTimers(CFRunLoopRef rl, CFRunLoopModeRef rlm, uint64_t limitTSR) {	/* DOES CALLOUT */
+    Boolean timerHandled = false;
+    CFMutableArrayRef timers = NULL;
+    // 获取timer数组
+    for (CFIndex idx = 0, cnt = rlm->_timers ? CFArrayGetCount(rlm->_timers) : 0; idx < cnt; idx++) {
+        CFRunLoopTimerRef rlt = (CFRunLoopTimerRef)CFArrayGetValueAtIndex(rlm->_timers, idx);
+        
+        if (__CFIsValid(rlt) && !__CFRunLoopTimerIsFiring(rlt)) {
+            if (rlt->_fireTSR <= limitTSR) {
+                if (!timers) timers = CFArrayCreateMutable(kCFAllocatorSystemDefault, 0, &kCFTypeArrayCallBacks);
+                CFArrayAppendValue(timers, rlt);
+            }
+        }
+    }
+    // 执行timer
+    for (CFIndex idx = 0, cnt = timers ? CFArrayGetCount(timers) : 0; idx < cnt; idx++) {
+        CFRunLoopTimerRef rlt = (CFRunLoopTimerRef)CFArrayGetValueAtIndex(timers, idx);
+        Boolean did = __CFRunLoopDoTimer(rl, rlm, rlt);
+        timerHandled = timerHandled || did;
+    }
+    if (timers) CFRelease(timers);
+    return timerHandled;
+}
+```
+
+
+
+
+
+##  设置timer下次触发时间的源码
 
 CFRunLoopTimerSetNextFireDate > CFRunLoopWakeUp
 
@@ -537,14 +578,6 @@ struct __CFRunLoopObserver {
 ```
 
 和source不同，observer对应的runloop是一个runloop指针，而非数组，此处说明一个observer只能观察一个runloop，所以observer只能添加到一个runloop的一个或者多个mode中。
-
-主要函数：
-
-```c
-CF_EXPORT Boolean CFRunLoopContainsObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFRunLoopMode mode);
-```
 
 ## 添加Observer源码
 
