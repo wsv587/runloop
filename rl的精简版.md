@@ -61,15 +61,15 @@ runLoop的结构如下图所示：
 ```c
 // RunLoop的结构体定义
 struct __CFRunLoop {
-    pthread_mutex_t _lock;			// 访问mode集合时用到的锁
-    __CFPort _wakeUpPort;			// 手动唤醒runloop的端口。初始化runloop时设置，仅用于CFRunLoopWakeUp，CFRunLoopWakeUp函数会向_wakeUpPort发送一条消息
-    pthread_t _pthread;					// 对应的线程
-    CFMutableSetRef _commonModes;		// 集合，存储的是字符串，记录所有标记为common的modeName
-    CFMutableSetRef _commonModeItems;   // 存储所有commonMode的sources、timers、observers
+    pthread_mutex_t _lock;						// 访问mode集合时用到的锁
+    __CFPort _wakeUpPort;							// 手动唤醒runloop的端口。初始化runloop时设置，仅用于CFRunLoopWakeUp，CFRunLoopWakeUp函数会向_wakeUpPort发送一条消息
+    pthread_t _pthread;								// 对应的线程
+    CFMutableSetRef _commonModes;			// 集合，存储的是字符串，记录所有标记为common的modeName
+    CFMutableSetRef _commonModeItems;	// 存储所有commonMode的sources、timers、observers
     CFRunLoopModeRef _currentMode;		// 当前modeName
-    CFMutableSetRef _modes;				// 集合，存储的是CFRunLoopModeRef
-    struct _block_item *_blocks_head;   // 链表头指针，该链表保存了所有需要被runloop执行的block。外部通过调用CFRunLoopPerformBlock函数来向链表中添加一个block节点。runloop会在CFRunLoopDoBlock时遍历该链表，逐一执行block
-    struct _block_item *_blocks_tail;   // 链表尾指针，之所以有尾指针，是为了降低增加block时的时间复杂度
+    CFMutableSetRef _modes;						// 集合，存储的是CFRunLoopModeRef
+    struct _block_item *_blocks_head; // 链表头指针，该链表保存了所有需要被runloop执行的block。外部通过调用CFRunLoopPerformBlock函数来向链表中添加一个block节点。runloop会在CFRunLoopDoBlock时遍历该链表，逐一执行block
+    struct _block_item *_blocks_tail; // 链表尾指针，之所以有尾指针，是为了降低增加block时的时间复杂度
 };
 ```
 
@@ -98,16 +98,36 @@ CF_EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CF
 
 ## RunLoop与线程关系
 
+取主线程的runloop
+
 ```c
-// 取主线程的RunLoop
 CFRunLoopRef CFRunLoopGetMain(void) {
     CHECK_FOR_FORK();
     static CFRunLoopRef __main = NULL; // no retain needed
-    // 传入主线程
+    // 入参是主线程获取runloop
     if (!__main) __main = _CFRunLoopGet0(pthread_main_thread_np()); // no CAS needed
     return __main;
 }
 ```
+
+取子线程的runloop
+
+```c
+CFRunLoopRef CFRunLoopGetCurrent(void) {
+    CHECK_FOR_FORK();
+    CFRunLoopRef rl = (CFRunLoopRef)_CFGetTSD(__CFTSDKeyRunLoop);
+    if (rl) return rl;
+    // 传入当前线程获取runloop
+    return _CFRunLoopGet0(pthread_self());
+}
+```
+
+
+
+以上获取主线程runloop和子线程runloop的函数内部都调用了**_CFRunLoopGet0()**，传入的参数是线程。
+另外，获取子线程的runloop传入的是pthread_self()函数获取到的当前线程。所以这里可以看出，CFRunLoopGetCurrent函数必须要在线程内部调用，才能获取当前线程的RunLoop。也就是说子线程的RunLoop必须要在子线程内部获取。
+
+_CFRunLoopGet0()函数源码如下：
 
 下面这段代码可以看出：
 
@@ -227,15 +247,15 @@ static uint32_t __CFSendTrivialMachMessage(mach_port_t port, uint32_t msg_id, CF
 typedef struct __CFRunLoopMode *CFRunLoopModeRef;
 
 struct __CFRunLoopMode {
-    CFStringRef _name;	// mode名字
-    Boolean _stopped;	  // mode的状态，标识mode是否停止
-    CFMutableSetRef _sources0;	// sources0事件集合
-    CFMutableSetRef _sources1;	// sources1事件集合
-    CFMutableArrayRef _observers;	// 观察者数组
-    CFMutableArrayRef _timers;	// 定时器数组
+    CFStringRef _name;							// mode名字
+    Boolean _stopped;	  						// mode的状态，标识mode是否停止
+    CFMutableSetRef _sources0;			// sources0事件集合
+    CFMutableSetRef _sources1;			// sources1事件集合
+    CFMutableArrayRef _observers;		// 观察者数组
+    CFMutableArrayRef _timers;			// 定时器数组
     CFMutableDictionaryRef _portToV1SourceMap;	 //字典。key是mach_port_t，value是CFRunLoopSourceRef
-    __CFPortSet _portSet;	// 端口的集合。保存所有需要监听的port，比如_wakeUpPort，_timerPort都保存在这个数组中
-    CFIndex _observerMask; // 添加obsever时设置_observerMask为observer的_activities（CFRunLoopActivity状态）
+    __CFPortSet _portSet;						// 端口的集合。保存所有需要监听的port，比如_wakeUpPort，_timerPort都保存在这个数组中
+    CFIndex _observerMask; 					// 添加obsever时设置_observerMask为observer的_activities（CFRunLoopActivity状态）
 };
 ```
 
@@ -243,8 +263,8 @@ struct __CFRunLoopMode {
 在Core Foundation中，针对Mode的操作，苹果只开放了以下3个API（cocoa中也有功能一样的函数，不再列出）：
 
 ```c
-CF_EXPORT CFStringRef CFRunLoopCopyCurrentMode(CFRunLoopRef rl); // 返回当前运行的mode的name
-CF_EXPORT CFArrayRef CFRunLoopCopyAllModes(CFRunLoopRef rl); // 返回当前RunLoop的所有mode
+CF_EXPORT CFStringRef CFRunLoopCopyCurrentMode(CFRunLoopRef rl); 					// 返回当前运行的mode的name
+CF_EXPORT CFArrayRef CFRunLoopCopyAllModes(CFRunLoopRef rl); 							// 返回当前RunLoop的所有mode
 CF_EXPORT void CFRunLoopAddCommonMode(CFRunLoopRef rl, CFStringRef mode); // 向当前RunLoop的common modes中添加一个mode
 ```
 
@@ -285,7 +305,7 @@ source对应的runloop是一个集合，说明source可以被添加到多个runl
 
 ## Source0和Source1区别
 
-Source0：source0是App内部事件，由App自己管理的，像UIEvent、CFSocket都是source0。source0并不能主动触发事件，当一个source0事件准备处理时，要先调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理。然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。这些框架已经帮我们做好了，像网络请求的回调、滑动触摸的回调，我们不需要自己处理。 
+Source0：source0是App内部事件，由App自己管理的，像UIEvent、CFSocket都是source0。source0并不能主动触发事件，当一个source0事件准备处理时，要先调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理。然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。框架已经帮我们做好了这些调用，比如网络请求的回调、滑动触摸的回调，我们不需要自己处理。 
 
 Source1：由RunLoop和内核管理，Mach port驱动，如CFMachPort、CFMessagePort。source1包含了一个 mach_port 和一个回调（函数指针），被用于通过内核和其他线程相互发送消息。这种 Source 能主动唤醒 RunLoop 的线程。
 
@@ -370,15 +390,13 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
 }
 ```
 
-# runLoop timer 
+# RunLoop timer
 
 **CFRunLoopTimerRef** 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。其包含一个时间长度和一个回调（函数指针）。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调。
 
-CFRunLoopTimer结构体实现：
+### CFRunLoopTimer结构体
 
 ```c
-// CFRunLoopTimerRef 是基于时间的触发器，它和 NSTimer 是toll-free bridged 的，可以混用。
-// 其包含一个时间长度和一个函数回调。当其加入到 RunLoop 时，RunLoop会注册对应的时间点，当时间点到时，RunLoop会被唤醒以执行那个回调
 struct __CFRunLoopTimer {
     uint16_t _bits;							// 标记fire状态
     CFRunLoopRef _runLoop;			// timer所处的runloop
@@ -404,7 +422,7 @@ CF_EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CF
 
 
 
-添加timer源码：
+### 添加timer源码
 
 作用：添加timer到rl->commonModeItems中，添加timer到runloopMode中，根据触发时间调整timer在runloopMode->timers数组中的位置。
 
@@ -464,9 +482,7 @@ void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef rlt, CFStringRef modeN
 
 
 
-设置timer下次触发时间的源码：
-
-CFRunLoopTimerSetNextFireDate > CFRunLoopWakeUp
+### 设置timer下次触发时间的源码
 
 ```c
 void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef rlt, CFAbsoluteTime fireDate) {
@@ -530,7 +546,7 @@ void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef rlt, CFAbsoluteTime fireDat
 
 
 
-# runLoop observer
+# RunLoop observer
 
 Observer顾名思义，观察者，和我们设计模式中的观察者模式如出一辙。每个 Observer 都包含了一个回调（函数指针），observer主要观察runloop的状态变化，然后执行回调函数。runloop可观察的状态主要有6种状态，如下：
 
@@ -550,13 +566,12 @@ typedef CF_OPTIONS(CFOptionFlags, CFRunLoopActivity) {
 
 
 
-CFRunLoopObserver结构体：
+### CFRunLoopObserver结构体定义
 
 ```c
-// CFRunLoopObserver是观察者，可以观察RunLoop的各种状态，并执行回调
 struct __CFRunLoopObserver {
-    CFRunLoopRef _runLoop;  // observer所观察的runloop
-    CFOptionFlags _activities; // CFOptionFlags是UInt类型的别名，_activities用来说明要观察runloop的哪些状态。一旦指定了就不可变。
+    CFRunLoopRef _runLoop;  						// observer所观察的runloop
+    CFOptionFlags _activities; 					// CFOptionFlags是UInt类型的别名，_activities用来说明要观察runloop的哪些状态。一旦指定了就不可变。
     CFRunLoopObserverCallBack _callout;	// 观察到runloop状态变化后的回调(不可变)
 };
 ```
@@ -571,7 +586,7 @@ CF_EXPORT void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef observ
 CF_EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFRunLoopMode mode);
 ```
 
-## 添加Observer源码
+### 添加Observer源码
 
 备注：以下代码存在精简
 
@@ -623,7 +638,7 @@ void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef rlo, CFStringRef
 
 
 
-## 自定义Observer来监听runloop状态变化
+### 自定义Observer来监听runloop状态变化
 
 ```c
 
