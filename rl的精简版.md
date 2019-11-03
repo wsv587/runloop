@@ -5,6 +5,9 @@
 # 前言
 
 对iOS开发者而言，runloop是一个老生常谈的话题，但凡是iOS开发者，在工作中必然直接或间接的接触过runloop。而对于面试者而言，runloop又几乎是必考点。在4年前，笔者写过一篇文章[NSRunLoop](https://www.cnblogs.com/wsnb/p/4753685.html)，对runloop原理以及应用场景做了基本介绍。但是对于不了解源码的同学，读起来也只能理解皮毛，不看源码的话，读了n多篇也是似懂非懂，对于原理也只能是死记硬背。所以，本文将从源码的角度剖析runloop的组成，强化自己对runloop的认识，验证我们脑海中一直以来似懂非懂的原理，真心希望这篇文章能够帮助到大家。
+
+> 注意：为了减少篇幅、避免困惑，本篇文章贴出的源码稍有精简，比如去除了lock和windows的代码。
+
 # 为什么是runLoop
 runloop顾名思义就是”跑圈“，所谓跑圈就给人一种循环的感觉。runloop运行的核心代码就是一个有状态的do...while循环。每循环一次就相当于跑了一圈，线程就会对当前这一圈里面产生的事件进行处理。那么为什么线程要有runloop呢？其实我们的APP可以理解为是靠event驱动的（包括iOS和Android应用）。我们触摸屏幕、网络回调等都是一个个的event，也就是事件。这些事件产生之后会分发给我们的APP，APP接收到事件之后分发给对应的线程。通常情况下，如果线程没有runloop，那么一个线程一次只能执行一个任务，执行完成后线程就会退出。要想APP的线程一直能够处理事件或者等待事件（比如异步事件），就要保活线程，也就是不能让线程早早的退出，此时runloop就派上用场了。我们已经说了，runloop本质上就是一个有状态的do...while循环，所以只要不是超时或者故意退出状态，那么runLoop就会一直执行do...while，所以可以保证线程不退出。其实也不是必须要给线程指定一个runloop，如果需要我们线程能够持续的处理事件，那么就需要给线程绑定一个runloop。也就是说，runloop能够保证线程一直可以一直处理事件。所以runloop的作用可以理解为：
 
@@ -33,6 +36,8 @@ __CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__		// 处理source1回�
 
 以上这6个函数名字之所以如此之长，也只是为了实现自解释。通过查看名字我们可以看出这几个函数都是calling_out的，也就是都是**向外**回调的函数。所谓的**向外**是相对于runloop的，其实就是runLoop向上层回调，通过回调函数runloop可以通知上层runloop当前处于什么状态或正在处理什么事件。具体的每个函数的作用会在下文详细解释，不必在此纠结。
 
+
+
 # runLoop 结构
 runLoop的结构如下图所示：
 
@@ -53,8 +58,6 @@ runLoop的结构如下图所示：
 
 
 ## RunLoop结构体定义
-
-注意：为了减少篇幅、避免困惑，本篇文章的源码稍有精简.
 
 ```c
 // RunLoop的结构体定义
@@ -122,6 +125,9 @@ CF_EXPORT void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^blo
 
 # RunLoop与线程关系
 
+以下是获取主线程runloop和子线程runloop的函数。可以看出，这两个函数内部都调用了**_CFRunLoopGet0()**，CFRunLoopGet0()的入参是线程。
+另外，获取子线程的runloop传入的是pthread_self()函数获取到的当前线程。所以这里可以看出，CFRunLoopGetCurrent函数必须要在线程内部调用，才能获取当前线程的RunLoop。也就是说子线程的RunLoop必须要在子线程内部获取。而主线程却没有这个限制，但是一般场景下也没有在子线程获取主线程runloop的必要。
+
 获取主线程的runloop
 
 ```c
@@ -134,7 +140,7 @@ CFRunLoopRef CFRunLoopGetMain(void) {
 }
 ```
 
-取子线程的runloop
+获取子线程的runloop
 
 ```c
 CFRunLoopRef CFRunLoopGetCurrent(void) {
@@ -146,19 +152,7 @@ CFRunLoopRef CFRunLoopGetCurrent(void) {
 }
 ```
 
-
-
-以上获取主线程runloop和子线程runloop的函数内部都调用了**_CFRunLoopGet0()**，传入的参数是线程。
-另外，获取子线程的runloop传入的是pthread_self()函数获取到的当前线程。所以这里可以看出，CFRunLoopGetCurrent函数必须要在线程内部调用，才能获取当前线程的RunLoop。也就是说子线程的RunLoop必须要在子线程内部获取。
-
-_CFRunLoopGet0()函数源码如下：
-
-下面这段代码可以看出：
-
-- RunLoop和线程的一一对应的，对应的方式是以key-value的方式保存在一个全局字典中
-- 主线程的RunLoop会在初始化全局字典时创建
-- 子线程的RunLoop会在第一次获取的时候创建，如果不获取的话就一直不会被创建
-- RunLoop会在线程销毁时销毁
+_CFRunLoopGet0()函数源码
 
 ```c
 // 获取线程对应的runloop最终调用的核心函数
@@ -212,6 +206,13 @@ CF_EXPORT CFRunLoopRef _CFRunLoopGet0(pthread_t t) {
 ```
 
 
+
+通过阅读上面这段代码可以看出：
+
+- RunLoop和线程的一一对应的，对应的方式是以key-value的方式保存在一个全局字典中
+- 主线程的RunLoop会在初始化全局字典时创建
+- 子线程的RunLoop会在第一次获取的时候创建，如果不获取的话就一直不会被创建
+- RunLoop会在线程销毁时销毁
 
 # CFRunLoopMode
 
@@ -318,16 +319,6 @@ CFRunLoopAddSource\CFRunLoopAddObserver\CFRunLoopAddTimer的源码会在下面�
 
 # CFRunLoopSource
 
-主要函数：
-
-```c
-CF_EXPORT Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef source, CFRunLoopMode mode);
-```
-
-
-
 如下图所示，RLS结构体定义中包括两个版本的source，分别是version0和version1。version0和version1分别对用source0和source1。
 
 ![image-20191023174620729](/Users/wangsong/Library/Application Support/typora-user-images/image-20191023174620729.png)
@@ -354,16 +345,6 @@ source对应的runloop是一个集合，说明source可以被添加到多个runl
 Source0：source0是App内部事件，由App自己管理的，像UIEvent、CFSocket都是source0。source0并不能主动触发事件，当一个source0事件准备处理时，要先调用 CFRunLoopSourceSignal(source)，将这个 Source 标记为待处理。然后手动调用 CFRunLoopWakeUp(runloop) 来唤醒 RunLoop，让其处理这个事件。框架已经帮我们做好了这些调用，比如网络请求的回调、滑动触摸的回调，我们不需要自己处理。 
 
 Source1：由RunLoop和内核管理，Mach port驱动，如CFMachPort、CFMessagePort。source1包含了一个 mach_port 和一个回调（函数指针），被用于通过内核和其他线程相互发送消息。这种 Source 能主动唤醒 RunLoop 的线程。
-
-source相关的函数
-
-```c
-Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName);
-void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName);
-void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName);
-```
-
-
 
 ## 添加Source的源码
 
@@ -456,19 +437,7 @@ struct __CFRunLoopTimer {
 
 和source不同，timer对应的runloop是一个runloop指针，而非数组，所以此处说明一个timer只能添加到一个runloop。
 
-
-
-主要函数：
-
-```c
-CF_EXPORT Boolean CFRunLoopContainsTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopAddTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopRemoveTimer(CFRunLoopRef rl, CFRunLoopTimerRef timer, CFRunLoopMode mode);
-```
-
-
-
-### 添加timer源码
+### 添加timer的源码
 
 作用：添加timer到rl->commonModeItems中，添加timer到runloopMode中，根据触发时间调整timer在runloopMode->timers数组中的位置。
 
@@ -624,17 +593,7 @@ struct __CFRunLoopObserver {
 
 和source不同，observer对应的runloop是一个runloop指针，而非数组，此处说明一个observer只能观察一个runloop，所以observer只能添加到一个runloop的一个或者多个mode中。
 
-主要函数：
-
-```c
-CF_EXPORT Boolean CFRunLoopContainsObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFRunLoopMode mode);
-CF_EXPORT void CFRunLoopRemoveObserver(CFRunLoopRef rl, CFRunLoopObserverRef observer, CFRunLoopMode mode);
-```
-
 ### 添加Observer源码
-
-备注：以下代码存在精简
 
 ```objective-c
 void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef rlo, CFStringRef modeName) {
@@ -687,7 +646,6 @@ void CFRunLoopAddObserver(CFRunLoopRef rl, CFRunLoopObserverRef rlo, CFStringRef
 ### 自定义Observer来监听runloop状态变化
 
 ```c
-
     /* 创建一个observer对象
      第一个参数: 告诉系统如何给Observer对象分配存储空间
      第二个参数: 需要监听的状态类型
