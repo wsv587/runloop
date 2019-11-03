@@ -1036,10 +1036,8 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 
 ```c
 void CFRunLoopWakeUp(CFRunLoopRef rl) {
-    // ...
     // __CFSendTrivialMachMessage内部调用mach_msg函数向runloop的wakeUpPort发送消息以唤醒runloop
     kern_return_t ret = __CFSendTrivialMachMessage(rl->_wakeUpPort, 0, MACH_SEND_TIMEOUT, 0);
-  	// ..
 }
 
 // 手动调用 mach_msg 向 rl->_wakeUpPort sendMsg 以唤醒runloop
@@ -1056,11 +1054,9 @@ static uint32_t __CFSendTrivialMachMessage(mach_port_t port, uint32_t msg_id, CF
 }
 ```
 
-# 
+# GCD和RunLoop的关系
 
-# 主线程RunLoop和GCD的关系
-
-当调用 dispatch_async(dispatch_get_main_queue(), block) 时，libDispatch  会向主线程的 RunLoop 发送消息，RunLoop会被唤醒，并从消息中取得这个 block，并在回调  \__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__() 里执行这个  block。但这个逻辑仅限于 dispatch 到主线程，dispatch 到其他线程仍然是由 libDispatch 处理的。那么你肯定会问：为什么子线程没有这个和GCD交互的逻辑？原因有二：
+当调用 dispatch_async(dispatch_get_main_queue(), block) 时，libDispatch  会向**主线程的RunLoop**发送消息，RunLoop会被唤醒，并从消息中取得这个 block，并在回调  \__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__() 里执行这个  block。但这个逻辑仅限于 dispatch 到主线程，dispatch 到其他线程仍然是由 libDispatch 处理的。那么你肯定会问：为什么子线程没有这个和GCD交互的逻辑？原因有二：
 
 - 主线程runloop是主线程的事件管理者。runloop负责何时让runloop处理何种事件。所有分发个主线程的任务必须统一交给主线程runloop排队处理。举例：UI操作只能在主线程，不在主线程操作UI会带来很多UI错乱问题以及UI更新延迟问题。
 
@@ -1068,9 +1064,15 @@ static uint32_t __CFSendTrivialMachMessage(mach_port_t port, uint32_t msg_id, CF
 
 
 
-# 自动释放池和runloop的关系
+# AutoreleasePool和RunLoop的关系
 
+App启动后，苹果在主线程 RunLoop 里注册了两个 Observer，其回调都是 _wrapRunLoopWithAutoreleasePoolHandler()。
 
+第一个 Observer 监视的事件是 Entry(即将进入Loop)，其回调内会调用 _objc_autoreleasePoolPush() 创建自动释放池。其 order 是-2147483647，优先级最高，保证创建释放池发生在其他所有回调之前。
+
+第二个 Observer 监视了两个事件： BeforeWaiting(准备进入休眠)  时调用_objc_autoreleasePoolPop() 和 _objc_autoreleasePoolPush()  释放旧的池并创建新池；Exit(即将退出Loop) 时调用 _objc_autoreleasePoolPop() 来释放自动释放池。这个  Observer 的 order 是 2147483647，优先级最低，保证其释放池子发生在其他所有回调之后。
+
+在主线程执行的代码，通常是写在诸如事件回调、Timer回调内的。这些回调会被 RunLoop 创建好的 AutoreleasePool 环绕着，所以不会出现内存泄漏，开发者也不必显示创建 Pool 了。
 
 # RunLoop应用
 
@@ -1095,6 +1097,8 @@ AFNetworking2.0的常驻线程
 ## reloadData
 
 
+
+# RunLoop嵌套
 
 
 
