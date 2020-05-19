@@ -1076,39 +1076,19 @@ App启动后，苹果在主线程 RunLoop 里注册了两个 Observer，其回�
 
 # RunLoop应用
 
-## Timer
+runloop在实际开发中有很多应用，通过源码可知苹果官方规定runloop一次只能运行在一个mode中，要想切换mode必须退出当前mode，以此来实现runloop不同mode的隔离。runloop的mode隔离实现了不同mode下任务的隔离。隔离了不同的mode就代表了隔离了不同mode下的source、timer、observer。这样做的好处是当前mode只会执行当前mode中的sourece、timer、observer，可以极大节省CPU资源。与所有任务都运行在一个mode中相比，这是一种很巧妙的设计。但苹果并没有将每个mode都严格的隔离，考虑到有些代码在不同的mode中都要执行的场景（比如，列表滚动时还要保证轮播图定时轮播），苹果又提供了一个名为commonMode的mode，这个mode不是一个真正的mode，而是多个mode的合集。兼顾性能的同时又给拓展留了活口，这种设计方式很值得学习。
 
+苹果在AutoreleasePool、手势识别、事件响应、UI更新、定时器、NSObject延时调用方法（performSelecter:afterDelay: ）等方面都有使用RunLoop。有兴趣的同学可以研究一下官方源码。
 
+另外，众所周知，为了**线程保活**，AFNetworking内部也使用了runLoop：通过给子线程添加一个runloop来保证这个子线程不退出。这样，当需要这个子线程执行任务时，AFNetworking 通过调用 [NSObject performSelector:onThread:..] 将任务抛给这个子线程的 RunLoop 即可。
 
-## 线程保活
-
-AFNetworking2.0的常驻线程
-
-
-
-## 卡顿监控
-
-
-
-## 异步绘制
-
-
-
-## reloadData
-
-
-
-# RunLoop嵌套
-
-
-
-
+其他有使用runLoop的地方还有卡顿监控、异步绘制等。总之，只要我们想要保活线程能够随时处理任务，这个线程必须要有runloop。
 
 # 总结
 
-一句话概括runLoop：一个有状态的事件驱动的do...while循环。
+至此，结合源码分析runLoop基本告一段落，因为篇幅限制，本文对runLoop的应用一带而过，感兴趣的同学可以深入研究。笔者此处用一句话概括runLoop：runLoop是一个有状态的、事件驱动的do...while循环。
 
-
+RunLoop嵌套
 
 # 参考文章
 
